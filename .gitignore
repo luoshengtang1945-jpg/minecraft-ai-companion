@@ -1,4 +1,58 @@
 node_modules/
+.gradle-user-home/
+
+# Secrets and machine-local configuration
 .env
+.env.*
+!.env.example
+.npmrc
+.pypirc
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+secrets*.json
+auth.json
 *.log
 .DS_Store
+.idea/
+.vscode/
+*.iml
+out/
+
+# Local Minecraft/server data
+.minecraft/
+world/
+world_nether/
+world_the_end/
+saves/
+mods/
+resourcepacks/
+shaderpacks/
+screenshots/
+logs/
+crash-reports/
+libraries/
+versions/
+server.properties
+usercache.json
+whitelist.json
+ops.json
+*.jar
+!fabric/ai-companion-client/gradle/wrapper/gradle-wrapper.jar
+
+# User-specific skin and Fabric client configuration
+config/offlineskins/
+config/ai-companion-client.json
+
+# Fabric development outputs
+fabric/**/.gradle/
+fabric/**/build/
+fabric/**/run/
+
+# Local model weights
+*.gguf
+*.safetensors
+*.bin
+models/

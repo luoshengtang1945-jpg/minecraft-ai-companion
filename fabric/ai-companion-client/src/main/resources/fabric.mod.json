@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "ai_companion_client",
+  "version": "${version}",
+  "name": "AI Companion Client",
+  "description": "Local client integration for the AI_Companion Mineflayer player.",
+  "authors": [
+    "minecraft-ai-companion contributors"
+  ],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "io.github.minecraftaicompanion.client.AiCompanionClient"
+    ]
+  },
+  "mixins": [
+    "ai_companion_client.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.18.1",
+    "minecraft": "=1.21.11",
+    "java": ">=21"
+  }
+}

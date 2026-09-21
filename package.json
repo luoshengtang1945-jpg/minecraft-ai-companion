@@ -1,16 +1,22 @@
 {
   "name": "minecraft-ai-companion",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Local-first Minecraft companion powered by Mineflayer and Ollama",
+  "main": "bot.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node bot.js",
+    "check": "node scripts/check-syntax.js",
+    "test": "node test/run.js"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
+    "dotenv": "^18.0.1",
     "mineflayer": "^4.39.0",
     "mineflayer-pathfinder": "^2.4.5"
   }
