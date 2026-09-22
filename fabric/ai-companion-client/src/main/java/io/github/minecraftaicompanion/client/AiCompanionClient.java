@@ -12,16 +12,24 @@ public final class AiCompanionClient implements ClientModInitializer {
     private static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
     private static LocalCompanionSkin companionSkin;
+    private static LocalVisionBridge visionBridge;
 
     @Override
     public void onInitializeClient() {
         FabricLoader loader = FabricLoader.getInstance();
         CompanionIdentityConfig config = CompanionConfigLoader.load(loader.getConfigDir(), LOGGER);
         companionSkin = new LocalCompanionSkin(loader.getGameDir(), config, LOGGER);
+        visionBridge = new LocalVisionBridge(config, LOGGER);
         LOGGER.info(
             "AI Companion client integration enabled for remote profile {}",
             config.profileName
         );
+    }
+
+    public static void onFrameRendered(net.minecraft.client.MinecraftClient client) {
+        if (visionBridge != null) {
+            visionBridge.onFrameRendered(client);
+        }
     }
 
     public static SkinTextures getSkinOverride(AbstractClientPlayerEntity player) {

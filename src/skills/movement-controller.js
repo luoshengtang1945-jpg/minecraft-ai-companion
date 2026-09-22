@@ -12,6 +12,9 @@ class MovementController {
     this.movements = null
     this.behavior = { type: 'STOP', source: null, goalId: null }
     this.overrideOwner = null
+    this.learningActive = false
+    this.learningOwner = null
+    this.learningGoalSource = null
     this.playerCommandEpoch = 0
     this.goalManager?.on('changed', change => this.#handleGoalChange(change))
   }
@@ -96,6 +99,27 @@ class MovementController {
     return true
   }
 
+  resumeAfterRest(previous, expectedPlayerEpoch) {
+    if (this.playerCommandEpoch !== expectedPlayerEpoch || this.arbiter.owner !== LOCOMOTION_OWNERS.PLAYER ||
+        this.behavior.type !== 'STOP' || this.behavior.source !== GOAL_SOURCES.PLAYER ||
+        this.learningActive || this.learningPending) return false
+    if (previous.source === GOAL_SOURCES.PLAYER && previous.type !== 'FOLLOW') return true
+    if (previous.type === 'FOLLOW' && !this.getPlayer(previous.username)) return false
+    if (previous.type === 'FOLLOW' && previous.source === GOAL_SOURCES.PLAYER) return this.follow(previous.username)
+
+    // Release only the temporary STOP created by this rest episode. Never release
+    // a newer player STOP, and never bypass a survival/learning owner.
+    const goalId = this.behavior.goalId
+    this.behavior = { type: 'STOP', source: null, goalId: null }
+    if (goalId) this.goalManager?.complete(goalId)
+    this.arbiter.invalidateAutonomy()
+    this.arbiter.release(LOCOMOTION_OWNERS.PLAYER)
+    if (previous.type === 'FOLLOW' && previous.source === GOAL_SOURCES.AUTONOMOUS) {
+      return this.follow(previous.username, { source: GOAL_SOURCES.AUTONOMOUS, expectedAutonomyEpoch: this.getAutonomyEpoch() })
+    }
+    return true
+  }
+
   startAutonomousMovement({
     type,
     username,
@@ -151,6 +175,7 @@ class MovementController {
   }
 
   canRunAutonomousNonMovement(expectedAutonomyEpoch) {
+    if (this.learningActive) return false
     if (expectedAutonomyEpoch !== null && !this.arbiter.isAutonomyEpoch(expectedAutonomyEpoch)) return false
     return this.arbiter.owner === LOCOMOTION_OWNERS.NONE
   }
@@ -180,7 +205,87 @@ class MovementController {
   }
 
   canRunPresence() {
-    return this.arbiter.owner === LOCOMOTION_OWNERS.NONE
+    return !this.learningPending && !this.learningActive && this.goalManager?.current?.source !== GOAL_SOURCES.PLAYER_TASK && this.arbiter.owner === LOCOMOTION_OWNERS.NONE
+  }
+
+  setLearningPending(pending) {
+    this.learningPending = pending
+    if (pending) this.cancelPresenceWalk()
+  }
+
+  beginLearningSession(source = GOAL_SOURCES.AUTONOMOUS) {
+    if (this.learningActive) return true
+    if ([LOCOMOTION_OWNERS.PLAYER, LOCOMOTION_OWNERS.SURVIVAL].includes(this.arbiter.owner)) return false
+    this.arbiter.invalidateAutonomy()
+    if (this.arbiter.owner === LOCOMOTION_OWNERS.PRESENCE) this.cancelPresenceWalk()
+    if (this.arbiter.owner === LOCOMOTION_OWNERS.AUTONOMY) {
+      const goalId = this.behavior.goalId
+      this.behavior = { type: 'STOP', source: null, goalId: null }
+      this.arbiter.release(LOCOMOTION_OWNERS.AUTONOMY)
+      this.#stopPathing()
+      if (goalId) this.goalManager?.complete(goalId, GOAL_STATES.ABANDONED)
+    }
+    this.learningActive = true
+    this.learningGoalSource = source
+    this.learningOwner = source === GOAL_SOURCES.PLAYER_TASK
+      ? LOCOMOTION_OWNERS.PLAYER_TASK
+      : LOCOMOTION_OWNERS.AUTONOMY
+    return true
+  }
+
+  startLearningMovement(point, distance = 1) {
+    if (!this.learningActive || !point) return false
+    if (![LOCOMOTION_OWNERS.NONE, this.learningOwner].includes(this.arbiter.owner)) return false
+    if (!this.arbiter.acquire(this.learningOwner, 'LEARNING', { allowSame: true })) return false
+    this.behavior = {
+      type: 'LEARNING_MOVE_NEAR',
+      point,
+      distance,
+      source: this.learningGoalSource,
+      goalId: this.goalManager?.current?.type === 'LEARNING_EPISODE' ? this.goalManager.current.id : null
+    }
+    this.bot.pathfinder.setGoal(new GoalNear(point.x, point.y, point.z, distance))
+    return true
+  }
+
+  finishLearningMovement() {
+    if (!this.learningActive || this.behavior.type !== 'LEARNING_MOVE_NEAR') return false
+    if (this.arbiter.owner !== this.learningOwner) return false
+    this.behavior = { type: 'STOP', source: null, goalId: null }
+    this.arbiter.release(this.learningOwner)
+    this.#stopPathing()
+    return true
+  }
+
+  stopLearningMotion() {
+    if (!this.learningActive) return false
+    if (this.behavior.type === 'LEARNING_MOVE_NEAR') return this.finishLearningMovement()
+    return true
+  }
+
+  endLearningSession() {
+    if (!this.learningActive) return false
+    const learningOwner = this.learningOwner
+    this.learningActive = false
+    this.learningOwner = null
+    this.learningGoalSource = null
+    if (this.behavior.type === 'LEARNING_MOVE_NEAR') {
+      this.behavior = { type: 'STOP', source: null, goalId: null }
+      if (this.arbiter.owner === learningOwner) {
+        this.arbiter.release(learningOwner)
+        this.#stopPathing()
+      }
+    }
+    this.arbiter.invalidateAutonomy()
+    return true
+  }
+
+  isLearningActive() {
+    return this.learningActive
+  }
+
+  isLearningLocomotionOwner() {
+    return this.learningActive && this.arbiter.owner === this.learningOwner
   }
 
   startPresenceWalk(point) {
@@ -260,6 +365,7 @@ class MovementController {
   }
 
   #canStartAutonomous(expectedEpoch) {
+    if (this.learningActive) return false
     if (expectedEpoch !== null && !this.arbiter.isAutonomyEpoch(expectedEpoch)) return false
     return this.arbiter.owner === LOCOMOTION_OWNERS.NONE
   }
@@ -279,13 +385,19 @@ class MovementController {
     ) {
       return { owner: LOCOMOTION_OWNERS.AUTONOMY, reason: `resume ${this.behavior.type}` }
     }
+    if (
+      this.behavior.source === GOAL_SOURCES.PLAYER_TASK &&
+      this.goalManager?.current?.id === this.behavior.goalId
+    ) {
+      return { owner: LOCOMOTION_OWNERS.PLAYER_TASK, reason: `resume ${this.behavior.type}` }
+    }
     this.behavior = { type: 'STOP', source: null, goalId: null }
     return { owner: LOCOMOTION_OWNERS.NONE, reason: null }
   }
 
   #applyBehavior() {
     if (!this.movements) return
-    const { type, username, point } = this.behavior
+    const { type, username, point, distance = 1 } = this.behavior
     const player = username ? this.getPlayer(username) : null
 
     if (type === 'FOLLOW' && player) {
@@ -296,8 +408,8 @@ class MovementController {
     } else if (type === 'AUTONOMOUS_COME' && player) {
       const { x, y, z } = player.position
       this.bot.pathfinder.setGoal(new GoalNear(x, y, z, 2))
-    } else if (['WANDER_NEAR_PLAYER', 'EXPLORE_NEARBY', 'PRESENCE_WANDER'].includes(type) && point) {
-      this.bot.pathfinder.setGoal(new GoalNear(point.x, point.y, point.z, 1))
+    } else if (['WANDER_NEAR_PLAYER', 'EXPLORE_NEARBY', 'PRESENCE_WANDER', 'LEARNING_MOVE_NEAR'].includes(type) && point) {
+      this.bot.pathfinder.setGoal(new GoalNear(point.x, point.y, point.z, type === 'LEARNING_MOVE_NEAR' ? distance : 1))
     } else if (type === 'AUTONOMOUS_WAIT' || type === 'STOP') {
       this.#stopPathing()
     }
@@ -318,10 +430,13 @@ class MovementController {
     if (!this.behavior.goalId || this.behavior.goalId !== change.goal.id) return
     if (this.overrideOwner && change.event === 'completed') return
 
-    const wasAutonomous = this.behavior.source === GOAL_SOURCES.AUTONOMOUS
+    const movementOwner = this.behavior.source === GOAL_SOURCES.PLAYER_TASK
+      ? LOCOMOTION_OWNERS.PLAYER_TASK
+      : LOCOMOTION_OWNERS.AUTONOMY
+    const wasLearningOrAutonomous = [GOAL_SOURCES.AUTONOMOUS, GOAL_SOURCES.PLAYER_TASK].includes(this.behavior.source)
     this.behavior = { type: 'STOP', source: null, goalId: null }
-    if (wasAutonomous && this.arbiter.owner === LOCOMOTION_OWNERS.AUTONOMY) {
-      this.arbiter.release(LOCOMOTION_OWNERS.AUTONOMY)
+    if (wasLearningOrAutonomous && this.arbiter.owner === movementOwner) {
+      this.arbiter.release(movementOwner)
       this.#stopPathing()
     }
   }

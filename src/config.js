@@ -49,7 +49,12 @@ module.exports = {
   ollama: {
     url: process.env.OLLAMA_URL || 'http://localhost:11434/api/chat',
     model: process.env.OLLAMA_MODEL || 'qwen3-vl:8b',
-    timeoutMs: numberFromEnv('OLLAMA_TIMEOUT_MS', 120000, { min: 1000 })
+    timeoutMs: numberFromEnv('OLLAMA_TIMEOUT_MS', 120000, { min: 1000 }),
+    responseRetries: numberFromEnv('OLLAMA_RESPONSE_RETRIES', 2, { min: 0, max: 5 }),
+    retryBackoffMs: numberFromEnv('OLLAMA_RETRY_BACKOFF_MS', 250, { min: 0, max: 5000 }),
+    think: booleanFromEnv('OLLAMA_THINK', false),
+    debug: booleanFromEnv('OLLAMA_DEBUG', false),
+    debugRawMaxChars: numberFromEnv('OLLAMA_DEBUG_RAW_MAX_CHARS', 2000, { min: 100, max: 10000 })
   },
   survival: {
     initialCombatMode: combatModeFromEnv(),
@@ -59,6 +64,10 @@ module.exports = {
     immediateDangerRange: numberFromEnv('IMMEDIATE_DANGER_RANGE', 3.5, { min: 2, max: 8 }),
     defenseMemoryMs: numberFromEnv('DEFENSE_MEMORY_MS', 5000, { min: 500 }),
     attackOrderMs: numberFromEnv('ATTACK_ORDER_MS', 15000, { min: 1000 }),
+    maxPursuitMs: numberFromEnv('COMBAT_MAX_PURSUIT_MS', 8000, { min: 1000, max: 30000 }),
+    maxPursuitDistance: numberFromEnv('COMBAT_MAX_PURSUIT_DISTANCE', 6, { min: 2, max: 16 }),
+    playerLeash: numberFromEnv('COMBAT_PLAYER_LEASH', 8, { min: 3, max: 24 }),
+    pursuitCooldownMs: numberFromEnv('COMBAT_PURSUIT_COOLDOWN_MS', 10000, { min: 1000 }),
     lowHealth: numberFromEnv('LOW_HEALTH_THRESHOLD', 8, { min: 1, max: 20 }),
     safeHealth: numberFromEnv('SAFE_HEALTH_THRESHOLD', 12, { min: 1, max: 20 }),
     retreatDistance: numberFromEnv('RETREAT_DISTANCE', 8, { min: 3 }),
@@ -89,7 +98,42 @@ module.exports = {
     walkTimeoutMs: numberFromEnv('PRESENCE_WALK_TIMEOUT_MS', 8000, { min: 2000 }),
     maxPlayerDistance: numberFromEnv('AUTONOMY_MAX_PLAYER_DISTANCE', 16, { min: 6, max: 32 })
   },
+  companionship: {
+    enabled: booleanFromEnv('AUTO_ACCOMPANY_ENABLED', true),
+    delayMs: numberFromEnv('AUTO_ACCOMPANY_DELAY_MS', 3500, { min: 1000, max: 30000 }),
+    range: numberFromEnv('AUTO_ACCOMPANY_RANGE', 16, { min: 3, max: 24 })
+  },
+  learning: {
+    enabled: booleanFromEnv('LEARNING_ENABLED', false),
+    startDelayMs: numberFromEnv('LEARNING_START_DELAY_MS', 5000, { min: 500 }),
+    maxActions: numberFromEnv('LEARNING_MAX_ACTIONS', 20, { min: 1, max: 100 }),
+    maxDurationMs: numberFromEnv('LEARNING_MAX_DURATION_MS', 180000, { min: 10000, max: 1800000 }),
+    repeatedActionLimit: numberFromEnv('LEARNING_REPEAT_LIMIT', 3, { min: 2, max: 10 }),
+    observationRange: numberFromEnv('LEARNING_OBSERVATION_RANGE', 8, { min: 3, max: 16 }),
+    exploreRadius: numberFromEnv('LEARNING_EXPLORE_RADIUS', 16, { min: 8, max: 32 }),
+    moveTimeoutMs: numberFromEnv('LEARNING_MOVE_TIMEOUT_MS', 20000, { min: 1000, max: 120000 }),
+    memoryFile: path.resolve(process.cwd(), process.env.LEARNING_MEMORY_FILE || 'learning-memory/memory.json')
+  },
+  vision: {
+    enabled: booleanFromEnv('VISION_ENABLED', false),
+    bridgeHost: process.env.VISION_BRIDGE_HOST || '127.0.0.1',
+    bridgePort: numberFromEnv('VISION_BRIDGE_PORT', 32145, { min: 1024, max: 65535 }),
+    bridgeToken: process.env.VISION_BRIDGE_TOKEN || '',
+    maxFrameBytes: numberFromEnv('VISION_MAX_FRAME_BYTES', 2000000, { min: 65536, max: 8000000 }),
+    maxWidth: numberFromEnv('VISION_MAX_WIDTH', 1280, { min: 160, max: 3840 }),
+    maxHeight: numberFromEnv('VISION_MAX_HEIGHT', 720, { min: 90, max: 2160 }),
+    frameMaxAgeMs: numberFromEnv('VISION_FRAME_MAX_AGE_MS', 15000, { min: 1000, max: 120000 }),
+    freshFrameMs: numberFromEnv('VISION_FRESH_FRAME_MS', 5000, { min: 500, max: 30000 }),
+    backgroundIntervalMs: numberFromEnv('VISION_BACKGROUND_INTERVAL_MS', 45000, { min: 5000 }),
+    backgroundCooldownMs: numberFromEnv('VISION_BACKGROUND_COOLDOWN_MS', 30000, { min: 5000 }),
+    eventMinGapMs: numberFromEnv('VISION_EVENT_MIN_GAP_MS', 15000, { min: 1000 }),
+    changeThreshold: numberFromEnv('VISION_CHANGE_THRESHOLD', 0.2, { min: 0.01, max: 1 }),
+    visualTtlMs: numberFromEnv('VISION_OBSERVATION_TTL_MS', 30000, { min: 1000, max: 300000 }),
+    debugSaveFrames: booleanFromEnv('VISION_DEBUG_SAVE_FRAMES', false),
+    debugMaxFrames: numberFromEnv('VISION_DEBUG_MAX_FRAMES', 5, { min: 1, max: 50 }),
+    debugDirectory: path.resolve(process.cwd(), process.env.VISION_DEBUG_DIRECTORY || 'vision-debug')
+  },
   messages: {
-    spawn: process.env.SPAWN_MESSAGE || '我回来了，这次我会保护好自己。'
+    spawn: process.env.SPAWN_MESSAGE || ''
   }
 }

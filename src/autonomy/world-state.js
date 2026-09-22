@@ -76,7 +76,8 @@ function summarizeUsefulBlocks(bot, maxDistance) {
 }
 
 class WorldStateBuilder {
-  constructor({ bot, movement, survival, goalManager, journal, config }) {
+  constructor({ bot, movement, survival, goalManager, journal, config, session = null }) {
+    this.session = session
     this.bot = bot
     this.movement = movement
     this.survival = survival
@@ -124,6 +125,7 @@ class WorldStateBuilder {
       },
       combatMode: this.survival.getCombatMode(),
       behavior: this.movement.getBehaviorSummary(),
+      companionSession: this.session?.snapshot() || null,
       nearbyEntities: entities,
       usefulBlocks: summarizeUsefulBlocks(this.bot, this.config.resourceScanRange),
       inventory: summarizeInventory(this.bot),

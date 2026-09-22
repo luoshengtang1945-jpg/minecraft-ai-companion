@@ -13,11 +13,14 @@ class CombatController {
     this.targetId = null
     this.lastAttackAt = 0
     this.lastEquipCheckAt = 0
+    this.pursuing = false
   }
 
-  async engage(target, isAuthorized = () => true) {
+  async engage(target, isAuthorized = () => true, { pursue = true } = {}) {
     if (!isAuthorized()) return
     const changedTarget = this.targetId !== target.id
+    const changedPursuit = this.pursuing !== pursue
+    this.pursuing = pursue
     if (changedTarget) {
       this.targetId = target.id
       this.lastAttackAt = 0
@@ -25,7 +28,7 @@ class CombatController {
     }
 
     const distance = this.bot.entity.position.distanceTo(target.position)
-    if (changedTarget) {
+    if ((changedTarget || changedPursuit) && pursue) {
       this.movement.setOverrideGoal(
         OVERRIDE_OWNER,
         new GoalFollow(target, this.config.approachRange),
@@ -35,9 +38,9 @@ class CombatController {
 
     await this.#equipBestWeapon()
     if (!isAuthorized()) return
-    if (distance > this.config.meleeRange) return
+    if (this.bot.entity.position.distanceTo(target.position) > this.config.meleeRange) return
 
-    await this.bot.lookAt(
+    if (pursue) await this.bot.lookAt(
       target.position.offset(0, Math.max((target.height || 1.8) * 0.75, 1), 0),
       true
     )
@@ -60,6 +63,7 @@ class CombatController {
   disengage() {
     if (this.targetId !== null) this.logger.info('Combat target cleared')
     this.targetId = null
+    this.pursuing = false
     this.lastAttackAt = 0
   }
 

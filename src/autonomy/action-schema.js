@@ -13,6 +13,11 @@ function validateAutonomousDecision(value) {
   if (!value || typeof value !== 'object' || !AUTONOMOUS_ACTIONS.has(value.action)) {
     throw new Error(`Invalid autonomous action: ${value?.action}`)
   }
+  const allowed = ['action', 'message', 'reason', 'durationMs']
+  if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error('Unexpected autonomous decision fields')
+  if (value.message !== undefined && typeof value.message !== 'string') throw new Error('Autonomous message must be a string')
+  if (value.reason !== undefined && typeof value.reason !== 'string') throw new Error('Autonomous reason must be a string')
+  if (value.durationMs !== undefined && !Number.isFinite(value.durationMs)) throw new Error('Autonomous durationMs must be a number')
 
   return {
     action: value.action,

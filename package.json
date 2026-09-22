@@ -6,7 +6,12 @@
   "scripts": {
     "start": "node bot.js",
     "check": "node scripts/check-syntax.js",
-    "test": "node test/run.js"
+    "test": "node test/run.js",
+    "smoke:learning": "node scripts/smoke-learning-ollama.js --count=1",
+    "reliability:learning": "node scripts/smoke-learning-ollama.js --count=20",
+    "coherence:learning": "node scripts/test-learning-coherence.js --count=10",
+    "benchmark:vision": "node benchmark/vision/run.js",
+    "diagnose:ollama": "node scripts/diagnose-ollama-response.js"
   },
   "keywords": [],
   "author": "",

@@ -2,12 +2,14 @@ const { EventEmitter } = require('node:events')
 
 const GOAL_SOURCES = Object.freeze({
   AUTONOMOUS: 'AUTONOMOUS',
+  PLAYER_TASK: 'PLAYER_TASK',
   PLAYER: 'PLAYER',
   SURVIVAL: 'SURVIVAL'
 })
 
 const GOAL_PRIORITIES = Object.freeze({
   AUTONOMOUS: 10,
+  PLAYER_TASK: 30,
   PLAYER: 50,
   SURVIVAL: 100
 })
@@ -93,7 +95,11 @@ class GoalManager extends EventEmitter {
 
   #preemptCurrent(incoming) {
     const previous = this.current
-    if (incoming.source === GOAL_SOURCES.SURVIVAL && previous.resumable) {
+    if (
+      previous.resumable &&
+      (incoming.source === GOAL_SOURCES.SURVIVAL ||
+        (incoming.source === GOAL_SOURCES.PLAYER && previous.source === GOAL_SOURCES.PLAYER_TASK))
+    ) {
       previous.status = GOAL_STATES.INTERRUPTED
       this.suspended.push(previous)
       this.#emitChange('interrupted', previous)

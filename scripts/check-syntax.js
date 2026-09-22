@@ -3,7 +3,7 @@ const path = require('node:path')
 const vm = require('node:vm')
 
 const root = path.resolve(__dirname, '..')
-const inputs = [path.join(root, 'bot.js'), path.join(root, 'src'), path.join(root, 'test'), __filename]
+const inputs = [path.join(root, 'bot.js'), path.join(root, 'src'), path.join(root, 'test'), path.join(root, 'scripts'), path.join(root, 'benchmark')]
 const files = []
 
 function collect(filePath) {

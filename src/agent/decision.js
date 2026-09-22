@@ -15,15 +15,20 @@ function parseDecision(content) {
   }
 
   const cleaned = content.replace(/```json/gi, '').replace(/```/g, '').trim()
-  const decision = JSON.parse(cleaned)
+  return validateDecision(JSON.parse(cleaned))
+}
 
+function validateDecision(decision) {
   if (!decision || typeof decision !== 'object' || !ACTIONS.has(decision.action)) {
     throw new Error(`Invalid agent action: ${decision?.action}`)
   }
+  const keys = Object.keys(decision)
+  if (keys.some(key => !['action', 'reply'].includes(key))) throw new Error('Unexpected agent decision fields')
+  if (typeof decision.reply !== 'string') throw new Error('Agent reply must be a string')
 
   return {
     action: decision.action,
-    reply: typeof decision.reply === 'string' ? decision.reply : ''
+    reply: decision.reply
   }
 }
 
@@ -31,4 +36,4 @@ function chatSafe(text, maxLength = 220) {
   return text.replace(/\s+/g, ' ').trim().slice(0, maxLength)
 }
 
-module.exports = { ACTIONS, parseDecision, chatSafe }
+module.exports = { ACTIONS, parseDecision, validateDecision, chatSafe }

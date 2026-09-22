@@ -11,12 +11,18 @@ const {
 } = require('./threats')
 
 class SurvivalController {
-  constructor(bot, { combat, movement, logger, config, goalManager = null, journal = null }) {
+  constructor(bot, { combat, movement, logger, config, goalManager = null, journal = null, now = Date.now }) {
     this.bot = bot
     this.combat = combat
     this.movement = movement
     this.logger = logger
     this.config = config
+    this.now = now
+    this.pursuit = null
+    this.noPursuit = false
+    this.combatGeneration = 0
+    this.pursuitBlockedUntil = 0
+    this.companionPlayer = null
     this.goalManager = goalManager
     this.journal = journal
     this.timer = null
@@ -50,8 +56,22 @@ class SurvivalController {
   }
 
   observePlayer(username) {
-    // Retained as part of the agent-facing API; all visible players are eligible for defense.
+    if (this.bot.players[username]?.entity) this.companionPlayer = username
     return Boolean(this.bot.players[username]?.entity)
+  }
+
+  cancelPursuit() {
+    this.noPursuit = true
+    this.combatGeneration += 1
+    this.orderedTargetId = null
+    this.orderUntil = 0
+    this.selfDefendUntil = 0
+    this.defendUntil.clear()
+    this.pursuit = null
+    this.combat.disengage()
+    // A movement command cancels chasing, not an actual escape emergency.
+    if (this.reflexState === 'COMBAT') this.#clearThreat()
+    this.logger.info('[COMBAT] Player movement command: pursuit cancelled; contact defense only')
   }
 
   getCombatMode() {
@@ -60,6 +80,9 @@ class SurvivalController {
 
   setCombatMode(mode) {
     if (!isCombatMode(mode)) throw new Error(`Invalid combat mode: ${mode}`)
+    this.noPursuit = false
+    this.pursuitBlockedUntil = 0
+    this.combatGeneration += 1
     if (this.combatMode === mode) return false
 
     this.combatMode = mode
@@ -89,23 +112,28 @@ class SurvivalController {
     if (!target) return { accepted: false, reason: 'NO_TARGET' }
 
     this.orderedTargetId = target.id
-    this.orderUntil = Date.now() + this.config.attackOrderMs
+    this.orderUntil = this.now() + this.config.attackOrderMs
+    this.noPursuit = false
+    this.pursuitBlockedUntil = 0
+    this.combatGeneration += 1
     this.logger.info(`Explicit attack order accepted for ${target.name}`)
     return { accepted: true, target }
   }
 
   #scheduleTick() {
+    void this.tickOnce().catch(error => this.logger.throttled('survival-error', 3000, 'error', 'Survival tick failed', error))
+  }
+
+  async tickOnce() {
     if (this.tickRunning) return
     this.tickRunning = true
-    this.#tick()
-      .catch(error => this.logger.throttled('survival-error', 3000, 'error', 'Survival tick failed', error))
-      .finally(() => { this.tickRunning = false })
+    try { await this.#tick() } finally { this.tickRunning = false }
   }
 
   async #tick() {
     if (!this.bot.entity) return
 
-    const now = Date.now()
+    const now = this.now()
     if (this.orderUntil <= now) this.orderedTargetId = null
 
     const entities = Object.values(this.bot.entities)
@@ -172,17 +200,53 @@ class SurvivalController {
       return
     }
 
+    if (this.noPursuit || now < this.pursuitBlockedUntil) {
+      this.#clearThreat()
+      const generation = this.combatGeneration
+      // Do not borrow SURVIVAL locomotion merely to hit an enemy in reach.
+      const inReach = () => generation === this.combatGeneration &&
+        this.bot.entities[combatTarget.id] &&
+        this.bot.entity.position.distanceTo(combatTarget.position) <= (this.combat.config?.meleeRange ?? 3.1)
+      if (inReach()) await this.combat.engage(combatTarget, inReach, { pursue: false })
+      return
+    }
+
+    if (!this.pursuit) this.pursuit = { startedAt: now, origin: { ...this.bot.entity.position } }
+    if (this.#pursuitExceeded(combatTarget, now)) {
+      this.pursuitBlockedUntil = now + (this.config.pursuitCooldownMs ?? 10000)
+      this.orderedTargetId = null
+      this.orderUntil = 0
+      this.logger.info('[COMBAT] Pursuit limit reached; returning to previous behavior')
+      this.#clearThreat()
+      return
+    }
+
     this.movement.beginOverride(OVERRIDE_OWNER)
     this.#beginSurvivalGoal('DEFEND', combatTarget)
     this.#setReflexState('COMBAT', combatTarget)
-    await this.combat.engage(combatTarget, () => this.#isAttackAuthorized(combatTarget))
+    const generation = this.combatGeneration
+    await this.combat.engage(combatTarget, () => generation === this.combatGeneration && this.#isAttackAuthorized(combatTarget))
+  }
+
+  #pursuitExceeded(target, now) {
+    const origin = this.pursuit?.origin
+    if (!origin) return false
+    const position = this.bot.entity.position
+    const limit = this.config.maxPursuitDistance ?? 6
+    const fromOrigin = point => Math.hypot(point.x - origin.x, point.y - origin.y, point.z - origin.z)
+    const username = this.movement.getBehaviorSummary?.().username || this.companionPlayer
+    const player = this.bot.players[username]?.entity
+    return now - this.pursuit.startedAt >= (this.config.maxPursuitMs ?? 8000) ||
+      fromOrigin(position) > limit || fromOrigin(target.position) > limit ||
+      Boolean(player && (player.position.distanceTo(position) > (this.config.playerLeash ?? 8) ||
+        player.position.distanceTo(target.position) > (this.config.playerLeash ?? 8)))
   }
 
   #retreat(target, reason) {
     const changed = this.#setReflexState(reason, target)
     this.combat.disengage()
 
-    const now = Date.now()
+    const now = this.now()
     if (!changed && now - this.lastRetreatGoalAt < 750) return
     this.lastRetreatGoalAt = now
 
@@ -206,6 +270,7 @@ class SurvivalController {
   }
 
   #clearThreat() {
+    this.pursuit = null
     if (this.reflexState === 'IDLE' && !this.survivalGoalId) return
     if (this.reflexState !== 'IDLE') this.logger.info('Threat cleared; resuming previous behavior')
     this.reflexState = 'IDLE'
@@ -218,7 +283,7 @@ class SurvivalController {
   }
 
   #onEntityHurt(entity) {
-    const now = Date.now()
+    const now = this.now()
     if (entity.id === this.bot.entity?.id) {
       this.selfDefendUntil = now + this.config.defenseMemoryMs
       this.logger.throttled('self-defense', 3000, 'info', 'AI_Companion was hurt; checking nearby threats')
@@ -234,7 +299,7 @@ class SurvivalController {
     this.logger.throttled(`defend-${username}`, 3000, 'info', `${username} was hurt; checking nearby threats`)
   }
 
-  #activeDefendedPlayers(now = Date.now()) {
+  #activeDefendedPlayers(now = this.now()) {
     const players = []
 
     for (const [username, until] of this.defendUntil) {
@@ -253,7 +318,8 @@ class SurvivalController {
   #isAttackAuthorized(target) {
     if (!this.bot.entity || !this.bot.entities[target.id]) return false
 
-    const now = Date.now()
+    const now = this.now()
+    if (this.noPursuit || now < this.pursuitBlockedUntil || this.#pursuitExceeded(target, now)) return false
     const selected = selectCombatTarget({
       mode: this.combatMode,
       entities: Object.values(this.bot.entities),

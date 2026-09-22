@@ -56,3 +56,9 @@ fabric/**/run/
 *.safetensors
 *.bin
 models/
+
+# Local Learning Agent episodes, strategies, and temporary writes
+learning-memory/
+benchmark/results/
+vision-debug/
+benchmark/vision/results/

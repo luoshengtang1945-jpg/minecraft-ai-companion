@@ -59,10 +59,10 @@ class AutonomousActionRegistry {
   #registerDefaults() {
     this.register('IDLE', () => ({ executed: false, reason: 'IDLE' }))
     this.register('WAIT', (decision, state, epoch) => this.#wait(decision.durationMs, epoch))
-    this.register('SAY', decision => ({
-      executed: this.speech.say(decision.message, decision.reason || decision.message),
-      reason: 'SPEECH_COOLDOWN_OR_DEDUP'
-    }))
+    this.register('SAY', decision => {
+      const executed = this.speech.say(decision.message, decision.reason || decision.message)
+      return { executed, reason: executed ? null : this.speech.lastResult?.reason || 'SPEECH_COOLDOWN_OR_DEDUP' }
+    })
     this.register('LOOK_AT_PLAYER', (decision, state, epoch) => this.#lookAtPlayer(state, epoch))
     this.register('FOLLOW_PLAYER', (decision, state, epoch) => this.#followPlayer(state, epoch))
     this.register('COME_TO_PLAYER', (decision, state, epoch) => this.#comeToPlayer(state, epoch))

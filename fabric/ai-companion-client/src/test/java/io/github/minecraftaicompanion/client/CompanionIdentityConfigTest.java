@@ -16,6 +16,8 @@ class CompanionIdentityConfigTest {
         assertTrue(config.matchesProfile("ai_companion"));
         assertEquals("config/offlineskins/AI_Companion.png", config.skinPath);
         assertEquals("wide", config.model);
+        assertFalse(config.visionEnabled);
+        assertEquals("http://127.0.0.1:32145/v1/frames", config.visionEndpoint);
     }
 
     @Test
