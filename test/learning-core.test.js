@@ -90,6 +90,21 @@ test('block MOVE_NEAR excludes already-near blocks while retaining bounded model
     target: 'block:3,64,0', distance: 3 }, near), /already-near range/)
 })
 
+test('repeated no-progress movement to the same observed target leaves exploration available', () => {
+  const goal = createItemGoal('birch_log')
+  const current = observation({}, { nearbyEntities: [{ ref: 'entity:7', type: 'player', distance: 2 }] })
+  const attempts = [1, 2].map(() => ({ action: { action: 'MOVE_NEAR', target: 'entity:7', distance: 1.9 },
+    evaluation: { status: 'NO_PROGRESS' } }))
+  const schema = decisionSchemaForObservation(current, attempts, 2, goal)
+  assert.equal(schema.oneOf.some(entry => entry.properties.action.const === 'MOVE_NEAR'), false)
+  assert.equal(schema.oneOf.some(entry => entry.properties.action.const === 'EXPLORE'), true)
+  assert.throws(() => validateObservedPrimitiveAction({ action: 'MOVE_NEAR', target: 'entity:7', distance: 1.9 },
+    current, attempts, 2, goal), /Repeated movement/)
+  const newEvidence = observation({}, { nearbyEntities: [{ ref: 'entity:9', distance: 5 }] })
+  assert.equal(decisionSchemaForObservation(newEvidence, attempts, 2, goal).oneOf.some(entry =>
+    entry.properties.action.const === 'MOVE_NEAR'), true)
+})
+
 test('observed objective block focuses target choices without prescribing the primitive', () => {
   const goal = createItemGoal('birch_log')
   const far = observation({}, { nearbyBlocks: [
@@ -514,6 +529,20 @@ test('memory persists episodes, derives and retrieves a skill from actual succes
   failed.finish(EPISODE_OUTCOMES.FAILURE, 'ACTION_BUDGET_EXCEEDED', { finishedAt: 10 })
   await reloaded.recordEpisode(failed)
   assert.equal(reloaded.snapshot().episodes.at(-1).terminationReason, 'ACTION_BUDGET_EXCEEDED')
+})
+
+test('unrelated initial inventory does not become a learned skill prerequisite', () => {
+  const episode = successfulEpisode()
+  episode.initialObservation.inventory = { oak_log: 2 }
+  const candidate = skillFromSuccessfulEpisode(episode)
+  assert.equal('initialInventory' in candidate.preconditions, false)
+
+  const store = new LearningMemoryStore({ filePath: path.join(os.tmpdir(), 'unused-memory-test.json') })
+  store.data.skills.push({ ...candidate,
+    preconditions: { ...candidate.preconditions, initialInventory: ['oak_log'] } })
+  const retrieved = store.findRelevantSkills(episode.goal)[0]
+  assert.equal('initialInventory' in retrieved.preconditions, false)
+  assert.deepEqual(store.data.skills[0].preconditions.initialInventory, ['oak_log'])
 })
 
 test('concurrent episode saves are serialized and preserve both outcomes', async t => {

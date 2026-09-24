@@ -50,7 +50,6 @@ function skillFromSuccessfulEpisode(episode, now = Date.now) {
   const targetBlocks = [...new Set(evidence.filter(entry => Number.isInteger(entry.target?.type))
     .map(entry => entry.target?.name).filter(Boolean))].slice(0, 12)
   const targetDrops = [...new Set(evidence.map(entry => entry.target?.droppedItem).filter(Boolean))].slice(0, 8)
-  const initialInventory = Object.keys(episode.initialObservation.inventory || {}).sort()
   const fingerprint = crypto.createHash('sha256')
     .update(JSON.stringify({
       goal: normalizeGoalPattern(episode.goal),
@@ -61,7 +60,9 @@ function skillFromSuccessfulEpisode(episode, now = Date.now) {
   return {
     id: `learned-${fingerprint}`,
     goalPattern: normalizeGoalPattern(episode.goal),
-    preconditions: { targetBlocks, targetDrops, initialInventory },
+    // Merely carrying an item at episode start does not make it a causal
+    // prerequisite of the successful sequence.
+    preconditions: { targetBlocks, targetDrops },
     steps,
     evidence,
     confidence: 2 / 3,
@@ -131,7 +132,14 @@ class LearningMemoryStore {
       .filter(item => item.score > 0)
       .sort((a, b) => b.score - a.score || b.skill.confidence - a.skill.confidence)
       .slice(0, limit)
-      .map(item => JSON.parse(JSON.stringify(item.skill)))
+      .map(item => {
+        const copy = JSON.parse(JSON.stringify(item.skill))
+        // Older local memories recorded every initial inventory item as a
+        // precondition, including unrelated items. Do not feed that spurious
+        // requirement back to the model when reusing a skill.
+        if (copy.preconditions) delete copy.preconditions.initialInventory
+        return copy
+      })
   }
 
   async updateSkillOutcome(skillId, succeeded) {

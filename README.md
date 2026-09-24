@@ -630,15 +630,29 @@ experiment does not run. Make a backup or use a disposable LAN world.
 5. Repeat in another disposable run and say `跟我来` while an autonomous episode is pending or active. Confirm it cancels and PLAYER FOLLOW takes control immediately. Repeat with a nearby threat: SURVIVAL must preempt learning and remain responsive.
 6. Inspect the Git-ignored `learning-memory/memory.json` to see the episode, attempts, outcome, and any learned skill candidate. Restart with the flag set back to `false` for ordinary companionship.
 
-The optional **autonomous** task proposal in this section has unit and local-model
-coverage but has not been validated end to end in Minecraft. A Qwen proposal is
-not evidence that a full gathering skill exists.
+The optional **autonomous** task proposal was also observed once in a disposable
+peaceful superflat LAN world on 2026-09-25: without a player command, Qwen chose
+`TRY_OBTAIN_ITEM birch_log` after two idle decisions, then `DIG_BLOCK` and
+`MOVE_NEAR` the dropped stack. Mineflayer confirmed the inventory increase and
+the episode ended `SUCCESS`. One favorable live episode is not evidence that a
+general gathering skill exists or that future attempts will succeed.
 The short post-action settle delay only helps observe prompt item pickup; it cannot
 make dropped items enter the inventory or solve pathfinding to them.
 Qwen reflections are hypotheses: even with explicit grounding instructions it
 may speculate about an obstacle or map edge when the only confirmed signal is
 `NO_PATH`. The evaluator and skill creation still use observed outcome evidence,
 not those speculative explanations.
+Learned candidate preconditions include observed target block/drop kinds, not
+unrelated items the companion happened to carry at episode start. Older local
+memory files with that legacy inventory field are left intact on disk but the
+field is ignored when the candidate is retrieved for a new decision.
+Two consecutive no-progress moves to the same observed target temporarily
+remove that movement target from the next structured choice, while leaving
+generic `EXPLORE` and other valid actions to Qwen. This is not a resource
+search recipe. A newer player task supersedes an earlier explicit STOP; an
+active FOLLOW instead keeps PLAYER locomotion priority and pauses the task.
+If FOLLOW interrupts an in-progress exploration, that interrupted movement
+does not count as a failed learning attempt.
 
 In a disposable peaceful superflat LAN world on 2026-09-25, a fresh-memory
 player-requested episode did obtain `oak_log` in three evaluated primitives:

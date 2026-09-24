@@ -104,6 +104,17 @@ class MovementController {
     return true
   }
 
+  releasePlayerStopForTask() {
+    if (this.arbiter.owner !== LOCOMOTION_OWNERS.PLAYER ||
+        this.behavior.type !== 'STOP' || this.behavior.source !== GOAL_SOURCES.PLAYER) return false
+    this.#beginPlayerCommand()
+    const goalId = this.behavior.goalId
+    this.behavior = { type: 'STOP', source: null, goalId: null }
+    if (goalId) this.goalManager?.complete(goalId)
+    this.arbiter.release(LOCOMOTION_OWNERS.PLAYER)
+    return true
+  }
+
   resumeAfterRest(previous, expectedPlayerEpoch) {
     if (this.playerCommandEpoch !== expectedPlayerEpoch || this.arbiter.owner !== LOCOMOTION_OWNERS.PLAYER ||
         this.behavior.type !== 'STOP' || this.behavior.source !== GOAL_SOURCES.PLAYER ||

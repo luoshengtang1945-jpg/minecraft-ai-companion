@@ -129,6 +129,28 @@ test('player cancellation invalidates an in-flight learning decision', async () 
   assert.equal(fixture.movement.learning, false)
 })
 
+test('player-preempted movement pauses learning without charging a failed attempt', async () => {
+  const fixture = createFixture()
+  let executions = 0
+  fixture.options.client = { async decide() { return { action: 'EXPLORE', heading: 90, distance: 8 } },
+    async reflect() { throw new Error('preemption must not be reflected as a failure') } }
+  fixture.options.executor = { async execute() {
+    executions += 1
+    if (executions === 1) {
+      fixture.movement.owner = 'PLAYER'
+      return { success: false, reason: 'PLAYER_PREEMPTED' }
+    }
+    fixture.setInventory({ oak_log: 1 })
+    return { success: true, reason: 'ARRIVED' }
+  } }
+  fixture.options.sleep = async () => { fixture.movement.owner = 'NONE' }
+  const episode = await new LearningController(fixture.options).runExperiment()
+  assert.equal(executions, 2)
+  assert.equal(episode.outcome, 'SUCCESS')
+  assert.equal(episode.attempts.length, 1)
+  assert.equal(episode.attempts[0].evaluation.status, 'SUCCESS')
+})
+
 test('TASK_GOAL starts a PLAYER_TASK learning episode', async () => {
   const fixture = createFixture()
   const controller = new LearningController(fixture.options)

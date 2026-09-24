@@ -41,6 +41,16 @@ function failedDigTargets(attempts = []) {
     .map(attempt => attempt.action.target))
 }
 
+function repeatedUnproductiveMoveTargets(attempts = [], threshold = 2) {
+  const recent = attempts.slice(-threshold)
+  if (recent.length < threshold || !recent.every(attempt =>
+    attempt.action?.action === 'MOVE_NEAR' &&
+    ['FAILURE', 'NO_PROGRESS'].includes(attempt.evaluation?.status))) return new Set()
+  const target = recent[0].action.target
+  return recent.every(attempt => attempt.action.target === target)
+    ? new Set([target]) : new Set()
+}
+
 function objectiveDropRefs(observation, goal) {
   const item = goal?.objective?.type === 'INVENTORY_AT_LEAST' ? goal.objective.item : null
   if (!item) return []
@@ -86,6 +96,7 @@ function decisionSchemaForObservation(observation, attempts = [], repetitionThre
   const discouraged = discouragedParameterlessActions(attempts, repetitionThreshold)
   const unproductiveMaterials = failedDigMaterials(attempts)
   const failedTargets = failedDigTargets(attempts)
+  const unproductiveMoveTargets = repeatedUnproductiveMoveTargets(attempts, repetitionThreshold)
   const objectiveItem = goal?.objective?.type === 'INVENTORY_AT_LEAST' ? goal.objective.item : null
   const relevantDropRefs = objectiveDropRefs(observation, goal)
   const relevantBlockRefs = objectiveBlockRefs(observation, goal)
@@ -117,8 +128,9 @@ function decisionSchemaForObservation(observation, attempts = [], repetitionThre
     if (action === 'USE_ITEM' && !observation?.heldItem?.name) return []
     const eligible = action === 'DIG_BLOCK' ? diggableBlocks
       : action === 'ATTACK_ENTITY' ? hostiles
-        : action === 'MOVE_NEAR' && matchingDropObserved ? relevantDropRefs
-          : action === 'MOVE_NEAR' && relevantBlockRefs.length ? relevantBlockRefs : refs
+        : action === 'MOVE_NEAR' && matchingDropObserved ? relevantDropRefs.filter(ref => !unproductiveMoveTargets.has(ref))
+          : action === 'MOVE_NEAR' && relevantBlockRefs.length ? relevantBlockRefs.filter(ref => !unproductiveMoveTargets.has(ref))
+            : action === 'MOVE_NEAR' ? refs.filter(ref => !unproductiveMoveTargets.has(ref)) : refs
     if (variant.properties.target && !eligible.length) return []
     if (action === 'MOVE_NEAR') {
       const eligibleDroppedRefs = droppedRefs.filter(ref => eligible.includes(ref))
@@ -189,6 +201,9 @@ function validateObservedPrimitiveAction(value, observation, attempts = [], repe
   if (action.action === 'MOVE_NEAR' && observation?.nearbyEntities?.some(entity =>
     entity.ref === action.target && entity.droppedItem) && action.distance !== 1) {
     throw new Error('Moving to a dropped item requires a one-block stopping radius')
+  }
+  if (action.action === 'MOVE_NEAR' && repeatedUnproductiveMoveTargets(attempts, repetitionThreshold).has(action.target)) {
+    throw new Error('Repeated movement to this target produced no objective progress; choose a different intention')
   }
   if (action.action === 'MOVE_NEAR' && action.target.startsWith('block:')) {
     const block = observation?.nearbyBlocks?.find(entry => entry.ref === action.target)
@@ -278,4 +293,4 @@ class LearningOllamaClient {
 
 module.exports = { LearningOllamaClient, validateReflection, decisionSchemaForObservation, validateObservedPrimitiveAction,
   discouragedParameterlessActions, failedDigMaterials, failedDigTargets,
-  objectiveDropRefs, objectiveBlockRefs, repeatedUnproductiveObservation }
+  objectiveDropRefs, objectiveBlockRefs, repeatedUnproductiveObservation, repeatedUnproductiveMoveTargets }

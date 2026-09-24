@@ -52,6 +52,25 @@ const attempts = [1, 2].map(index => ({
   reflection
 }))
 
+const scenario = process.argv.find(argument => argument.startsWith('--scenario='))?.split('=')[1] || 'observation'
+if (!['observation', 'movement'].includes(scenario)) throw new Error('scenario must be observation or movement')
+
+const movementObservation = { ...unchangedObservation,
+  nearbyEntities: [{ ref: 'entity:7', type: 'player', distance: 2 }] }
+const movementAttempts = [1, 2].map(index => ({
+  index,
+  observationBefore: movementObservation,
+  action: { action: 'MOVE_NEAR', target: 'entity:7', distance: 1.9 },
+  observationAfter: movementObservation,
+  actionResult: { success: true, reason: 'REACHED_TARGET' },
+  evaluation: { status: 'NO_PROGRESS', reason: 'No objective-relevant change was observed' },
+  reflection: {
+    reflection: 'Moving to the same nearby player twice did not reveal or obtain the required item.',
+    lesson: 'Repeating movement to a known location without new evidence did not progress the objective.',
+    nextApproach: 'Explore a less recently observed nearby region instead of revisiting the same target.'
+  }
+}))
+
 const context = {
   goal: {
     id: 'synthetic-coherence-check',
@@ -60,8 +79,8 @@ const context = {
     objective: { type: 'INVENTORY_AT_LEAST', item: 'target_item', count: 1 },
     source: 'AUTONOMOUS'
   },
-  observation: unchangedObservation,
-  attempts,
+  observation: scenario === 'movement' ? movementObservation : unchangedObservation,
+  attempts: scenario === 'movement' ? movementAttempts : attempts,
   learnedSkills: [],
   repetitionThreshold: 2,
   explorationState: {
@@ -87,7 +106,7 @@ async function main() {
   }
   const exploreCount = choices.get('EXPLORE') || 0
   console.log(`[COHERENCE] distribution: ${JSON.stringify(Object.fromEntries(choices))}`)
-  if (exploreCount === 0) throw new Error('Model never selected EXPLORE after repeated no-progress observations')
+  if (exploreCount === 0) throw new Error(`Model never selected EXPLORE after repeated no-progress ${scenario}`)
   console.log(`[COHERENCE] PASS: EXPLORE selected ${exploreCount}/${count} trials`)
 }
 

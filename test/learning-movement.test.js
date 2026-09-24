@@ -56,6 +56,20 @@ test('pending player task blocks presence before its episode or inference acquir
   assert.equal(movement.canRunPresence(), true)
 })
 
+test('a newer player task can supersede STOP but cannot steal FOLLOW', () => {
+  const { movement, goalManager } = fixture()
+  assert.equal(movement.stop(), true)
+  assert.equal(movement.getLocomotionOwner(), 'PLAYER')
+  assert.equal(movement.releasePlayerStopForTask(), true)
+  assert.equal(movement.getLocomotionOwner(), 'NONE')
+  assert.equal(goalManager.current, null)
+  assert.equal(movement.beginLearningSession(GOAL_SOURCES.PLAYER_TASK), true)
+  movement.endLearningSession()
+  assert.equal(movement.follow('Steve'), true)
+  assert.equal(movement.releasePlayerStopForTask(), false)
+  assert.equal(movement.getLocomotionOwner(), 'PLAYER')
+})
+
 test('persistent EXPLORE crosses short segments without stopping and discovers a model-watched target', async () => {
   const { bot, movement, goals } = fixture()
   movement.beginLearningSession(GOAL_SOURCES.PLAYER_TASK)

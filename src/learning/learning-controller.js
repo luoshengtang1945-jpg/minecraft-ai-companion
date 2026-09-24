@@ -137,6 +137,9 @@ class LearningController {
     })
     const previous = this.runPromise
     if (this.isActive()) this.cancel('PREEMPTED_BY_PLAYER_TASK')
+    // A newer player task supersedes an earlier explicit wait. A persistent
+    // FOLLOW/COME still keeps PLAYER ownership and pauses this task instead.
+    this.movement.releasePlayerStopForTask?.()
     const pending = { goal: playerGoal, cancelled: false }
     this.pendingPlayerTask = pending
     this.movement.setLearningPending?.(true)
@@ -375,6 +378,11 @@ class LearningController {
           observationAfter,
           actionResult
         })
+        if (actionResult.reason === 'PLAYER_PREEMPTED' && evaluation.status !== EVALUATION.SUCCESS) {
+          this.logger.info(`[LEARN] ${action.action} yielded to player; no failed attempt charged`)
+          await this.sleep(0)
+          continue
+        }
         const attempt = episode.addAttempt({ observationBefore, action, observationAfter, actionResult, evaluation, reflection: null })
         if (actionExceededTimeBudget) {
           episode.finish(EPISODE_OUTCOMES.FAILURE, 'TIME_BUDGET_EXCEEDED', { reflection: this.#episodeReflection(episode), lessons: this.#lessons(episode), finishedAt: this.now() })
