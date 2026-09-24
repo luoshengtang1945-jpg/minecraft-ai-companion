@@ -10,7 +10,8 @@ class IntentionMonitor {
 
   matches(observation) {
     return [...(observation.nearbyBlocks || []), ...(observation.nearbyEntities || [])]
-      .filter(item => this.watched.has(item.name))
+      .filter(item => this.watched.has(item.name) ||
+        (item.droppedItem?.name && this.watched.has(item.droppedItem.name)))
   }
 
   check(observation) {

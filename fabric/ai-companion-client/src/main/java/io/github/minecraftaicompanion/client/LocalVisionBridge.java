@@ -4,6 +4,12 @@ import com.google.gson.Gson;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.texture.NativeImage;
 import net.minecraft.client.util.ScreenshotRecorder;
+import net.minecraft.client.gl.Framebuffer;
+import net.minecraft.client.gl.SimpleFramebuffer;
+import net.minecraft.client.network.AbstractClientPlayerEntity;
+import net.minecraft.client.option.Perspective;
+import net.minecraft.client.render.RenderTickCounter;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.entity.Entity;
 import net.minecraft.client.gui.screen.ChatScreen;
 import net.minecraft.client.gui.screen.GameMenuScreen;
@@ -27,7 +33,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 final class LocalVisionBridge {
-    static final String PERSPECTIVE = "HUMAN_CLIENT_CAMERA";
     private static final Gson GSON = new Gson();
 
     private final CompanionIdentityConfig config;
@@ -38,6 +43,9 @@ final class LocalVisionBridge {
     private final AtomicBoolean capturePending = new AtomicBoolean(false);
     private volatile long lastCaptureAt;
     private volatile long lastConnectionWarningAt;
+    private Framebuffer companionFramebuffer;
+    private Framebuffer framebufferOverride;
+    private Thread renderThread;
 
     LocalVisionBridge(CompanionIdentityConfig config, Logger logger) {
         this.config = config;
@@ -55,37 +63,93 @@ final class LocalVisionBridge {
             .connectTimeout(Duration.ofSeconds(2))
             .build();
         if (config.visionEnabled) {
-            logger.info("AI Companion visual bridge enabled at {} using explicit {} perspective", endpoint, PERSPECTIVE);
+            logger.info("AI Companion visual bridge enabled at {} using explicit {} perspective", endpoint, config.visionPerspective);
         }
+    }
+
+    Framebuffer getFramebufferOverride() {
+        return Thread.currentThread() == renderThread ? framebufferOverride : null;
     }
 
     void onFrameRendered(MinecraftClient client) {
         if (!config.visionEnabled || client.world == null || client.player == null || capturePending.get()) return;
         long now = System.currentTimeMillis();
-        if (now - lastCaptureAt < config.visionCaptureIntervalMs) return;
+        int interval = config.visionPerspective.equals("COMPANION_CAMERA")
+            ? config.visionCompanionCaptureIntervalMs : config.visionCaptureIntervalMs;
+        if (now - lastCaptureAt < interval) return;
+        AbstractClientPlayerEntity companion = null;
+        if (config.visionPerspective.equals("COMPANION_CAMERA")) {
+            companion = client.world.getPlayers().stream()
+                .filter(player -> player != client.player && config.matchesProfile(player.getGameProfile().name()))
+                .findFirst().orElse(null);
+            if (companion == null) {
+                warnThrottled("AI Companion camera unavailable: remote player is not loaded by this client", null);
+                return;
+            }
+        }
         if (!capturePending.compareAndSet(false, true)) return;
         lastCaptureAt = now;
         try {
             // Snapshot on the render thread, before asynchronous readback/encoding.
-            Entity camera = client.getCameraEntity();
+            long renderStartedAt = System.nanoTime();
+            Framebuffer source = companion == null ? client.getFramebuffer() : renderCompanionView(client, companion);
+            if (companion != null && System.nanoTime() - renderStartedAt > 50_000_000L) {
+                warnThrottled("AI Companion off-screen camera render exceeded 50 ms; increase visionCompanionCaptureIntervalMs if gameplay stutters", null);
+            }
+            Entity camera = companion == null ? client.getCameraEntity() : companion;
             Map<String, Double> pose = camera == null ? Map.of() : Map.of(
                 "x", camera.getX(), "y", camera.getY(), "z", camera.getZ(),
                 "yaw", (double)camera.getYaw(), "pitch", (double)camera.getPitch()
             );
-            String uiState = client.currentScreen == null ? "GAMEPLAY"
+            String uiState = companion != null ? "GAMEPLAY" : client.currentScreen == null ? "GAMEPLAY"
                 : client.currentScreen instanceof ChatScreen ? "CHAT"
                 : client.currentScreen instanceof GameMenuScreen ? "MENU"
                 : client.currentScreen instanceof HandledScreen<?> ? "INVENTORY" : "OTHER_SCREEN";
-            FrameContext context = new FrameContext(GSON.toJson(pose), client.world.getRegistryKey().getValue().toString(), uiState);
-            int factor = downscaleFactor(client.getFramebuffer().textureWidth, client.getFramebuffer().textureHeight);
-            ScreenshotRecorder.takeScreenshot(client.getFramebuffer(), factor, image -> encoder.execute(() -> encodeAndSend(context, image, now)));
+            FrameContext context = new FrameContext(config.visionPerspective, GSON.toJson(pose), client.world.getRegistryKey().getValue().toString(), uiState);
+            int factor = downscaleFactor(source.textureWidth, source.textureHeight);
+            ScreenshotRecorder.takeScreenshot(source, factor, image -> encoder.execute(() -> encodeAndSend(context, image, now)));
         } catch (RuntimeException error) {
             capturePending.set(false);
             warnThrottled("Could not capture Minecraft framebuffer", error);
         }
     }
 
-    private record FrameContext(String camera, String dimension, String uiState) {}
+    private Framebuffer renderCompanionView(MinecraftClient client, AbstractClientPlayerEntity companion) {
+        Framebuffer screen = client.getFramebuffer();
+        if (companionFramebuffer == null) {
+            companionFramebuffer = new SimpleFramebuffer("AI Companion camera", screen.textureWidth, screen.textureHeight, true);
+        } else if (companionFramebuffer.textureWidth != screen.textureWidth || companionFramebuffer.textureHeight != screen.textureHeight) {
+            companionFramebuffer.resize(screen.textureWidth, screen.textureHeight);
+        }
+
+        Entity originalCamera = client.getCameraEntity();
+        Perspective originalPerspective = client.options.getPerspective();
+        boolean originalHudHidden = client.options.hudHidden;
+        HitResult originalCrosshair = client.crosshairTarget;
+        Entity originalTarget = client.targetedEntity;
+        try {
+            renderThread = Thread.currentThread();
+            framebufferOverride = companionFramebuffer;
+            client.options.setPerspective(Perspective.FIRST_PERSON);
+            client.options.hudHidden = true;
+            client.setCameraEntity(companion);
+            var encoder = com.mojang.blaze3d.systems.RenderSystem.getDevice().createCommandEncoder();
+            encoder.clearColorAndDepthTextures(companionFramebuffer.getColorAttachment(), 0, companionFramebuffer.getDepthAttachment(), 1.0);
+            client.gameRenderer.updateCamera(RenderTickCounter.ONE);
+            client.gameRenderer.renderWorld(RenderTickCounter.ONE);
+            return companionFramebuffer;
+        } finally {
+            client.setCameraEntity(originalCamera);
+            client.options.setPerspective(originalPerspective);
+            client.options.hudHidden = originalHudHidden;
+            client.crosshairTarget = originalCrosshair;
+            client.targetedEntity = originalTarget;
+            framebufferOverride = null;
+            client.gameRenderer.updateCamera(client.getRenderTickCounter());
+        }
+    }
+
+    private record FrameContext(String perspective, String camera, String dimension, String uiState) {}
 
     private void encodeAndSend(FrameContext context, NativeImage image, long capturedAt) {
         boolean handedToTransport = false;
@@ -123,7 +187,7 @@ final class LocalVisionBridge {
             .header("Content-Type", "image/png")
             .header("X-AI-Companion-Frame-Id", UUID.randomUUID().toString())
             .header("X-AI-Companion-Captured-At", Long.toString(capturedAt))
-            .header("X-AI-Companion-Perspective", PERSPECTIVE)
+            .header("X-AI-Companion-Perspective", context.perspective())
             .header("X-AI-Companion-Signature", signature(image))
             .header("X-AI-Companion-Camera", context.camera())
             .header("X-AI-Companion-Dimension", context.dimension())

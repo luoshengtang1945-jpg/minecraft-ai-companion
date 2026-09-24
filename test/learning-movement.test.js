@@ -4,6 +4,14 @@ const { EventEmitter } = require('node:events')
 const { MovementController } = require('../src/skills')
 const { GoalManager, GOAL_SOURCES } = require('../src/goals')
 const { PrimitiveActionExecutor } = require('../src/learning')
+const { IntentionMonitor } = require('../src/learning/intention-monitor')
+const { explorationMoveTimeoutMs } = require('../src/learning/primitive-executor')
+
+test('long bounded exploration gets proportionate time without removing the cap', () => {
+  assert.equal(explorationMoveTimeoutMs(20000, 2), 20000)
+  assert.equal(explorationMoveTimeoutMs(20000, 16), 40000)
+  assert.equal(explorationMoveTimeoutMs(20000, 32), 60000)
+})
 
 function vector(x, y, z) {
   return { x, y, z, offset(dx, dy, dz) { return vector(x + dx, y + dy, z + dz) } }
@@ -73,6 +81,19 @@ test('persistent EXPLORE crosses short segments without stopping and discovers a
   assert.equal(movement.getLocomotionOwner(), 'NONE')
 })
 
+test('persistent exploration notices a newly observed dropped objective item', () => {
+  const monitor = new IntentionMonitor({
+    action: { action: 'EXPLORE', watchFor: ['birch_log'] },
+    goal: { objective: { type: 'INVENTORY_AT_LEAST', item: 'birch_log', count: 1 } },
+    initialObservation: { nearbyBlocks: [], nearbyEntities: [], inventory: {} }
+  })
+  const outcome = monitor.check({ nearbyBlocks: [], inventory: {}, nearbyEntities: [
+    { ref: 'entity:7', name: 'item', droppedItem: { name: 'birch_log', count: 1 } }
+  ] })
+  assert.equal(outcome.reason, 'SYMBOLIC_DISCOVERY')
+  assert.equal(outcome.evidence[0].ref, 'entity:7')
+})
+
 test('MOVE_NEAR keeps one path until route failure and supplies replanning evidence', async () => {
   const { bot, movement, goals } = fixture()
   movement.beginLearningSession()
@@ -85,6 +106,55 @@ test('MOVE_NEAR keeps one path until route failure and supplies replanning evide
   assert.equal(movement.getLocomotionOwner(), 'AUTONOMY')
   bot.emit('path_update', { status: 'noPath' })
   assert.equal((await pending).reason, 'NO_PATH')
+})
+
+test('block movement tightens an oversized model radius at the body layer', async () => {
+  const bot = new EventEmitter()
+  bot.entity = { position: vector(0, 64, 0) }
+  const requestedRadii = []
+  const movement = {
+    startLearningMovement(_point, radius) { requestedRadii.push(radius); return true },
+    getPlayerCommandEpoch: () => 0,
+    getLocomotionOwner: () => 'AUTONOMY',
+    isLearningLocomotionOwner: () => true,
+    finishLearningMovement() {}
+  }
+  const executor = new PrimitiveActionExecutor({ bot, movement,
+    observer: { resolve: () => ({ position: vector(6, 64, 0) }),
+      capture: () => ({ nearbyBlocks: [], nearbyEntities: [], inventory: {} }) } })
+  const pending = executor.execute({ action: 'MOVE_NEAR', target: 'block:6,64,0', distance: 5.7 })
+  assert.deepEqual(requestedRadii, [3.5])
+  bot.entity.position = vector(3, 64, 0)
+  bot.emit('goal_reached')
+  assert.deepEqual(await pending, { success: true, reason: 'REACHED_TARGET',
+    requestedDistance: 5.7, effectiveDistance: 3.5 })
+})
+
+test('dropped-item MOVE_NEAR tightens the path instead of reporting success outside pickup range', async () => {
+  const bot = new EventEmitter()
+  bot.entity = { position: vector(0, 64, 0) }
+  const item = { name: 'item', position: vector(3, 64, 0),
+    getDroppedItem: () => ({ name: 'oak_log', count: 1 }) }
+  const distances = []
+  let finished = 0
+  const movement = {
+    startLearningMovement(_point, distance) { distances.push(distance); return true },
+    getPlayerCommandEpoch: () => 0,
+    getLocomotionOwner: () => 'AUTONOMY',
+    isLearningLocomotionOwner: () => true,
+    finishLearningMovement() { finished++ }
+  }
+  const executor = new PrimitiveActionExecutor({ bot, movement,
+    observer: { resolve: () => item, capture: () => ({ nearbyBlocks: [], nearbyEntities: [], inventory: {} }) } })
+  const pending = executor.execute({ action: 'MOVE_NEAR', target: 'entity:7', distance: 1 })
+  bot.entity.position = vector(1.5, 64, 0)
+  bot.emit('goal_reached')
+  assert.deepEqual(distances, [0.5, 0])
+  assert.equal(finished, 0)
+  bot.entity.position = vector(2.5, 64, 0)
+  bot.emit('goal_reached')
+  assert.equal((await pending).reason, 'REACHED_TARGET')
+  assert.equal(finished, 1)
 })
 
 test('player FOLLOW interrupts a persistent intention without its cleanup clearing FOLLOW', async () => {

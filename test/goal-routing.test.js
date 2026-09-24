@@ -75,7 +75,7 @@ test('normal chat does not cancel learning and explicit cancellation does', asyn
   try {
     const fixture = agentFixture()
     fixture.agent.start()
-    fixture.bot.emit('chat', 'Steve', '你在干嘛？')
+    fixture.bot.emit('chat', 'Steve', '进展顺利吗？')
     await new Promise(resolve => setImmediate(resolve))
     assert.equal(fixture.counts().cancels, 0)
     assert.ok(fixture.messages.includes('在试呢。'))

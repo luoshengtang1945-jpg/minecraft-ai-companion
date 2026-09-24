@@ -70,7 +70,11 @@ const visionBridge = new VisionFrameServer({
   maxBytes: config.vision.maxFrameBytes,
   onFrame: frame => vision.onFrame(frame)
 })
-const movement = new MovementController(bot, { logger, goalManager })
+const movement = new MovementController(bot, {
+  logger,
+  goalManager,
+  autonomousMoveTimeoutMs: config.autonomy.moveTimeoutMs
+})
 const companionSession = new CompanionSessionContext({ bot, movement })
 const combat = new CombatController(bot, { movement, logger, config: config.combat })
 const survival = new SurvivalController(bot, {
@@ -96,7 +100,11 @@ const worldState = new WorldStateBuilder({
   journal,
   config: config.autonomy
 })
-const autonomyClient = new AutonomyOllamaClient({ ollama: config.ollama, personality, scheduler: ollamaScheduler, logger })
+const autonomyClient = new AutonomyOllamaClient({
+  ollama: config.ollama, personality, scheduler: ollamaScheduler, logger,
+  maxPlayerDistance: config.autonomy.maxPlayerDistance,
+  autonomousTasksEnabled: config.autonomy.taskLearningEnabled
+})
 const autonomousActions = new AutonomousActionRegistry({
   bot,
   movement,
@@ -145,6 +153,7 @@ const learning = new LearningController({
   logger,
   config: config.learning
 })
+autonomousActions.setLearningController(learning)
 const presence = new PresenceController({
   bot,
   movement,
@@ -189,7 +198,9 @@ bot.on('goal_reached', () => movement.handleGoalReached())
 
 bot.on('path_update', result => {
   if (result.status === 'noPath') {
-    logger.throttled('no-path', 5000, 'warn', 'No path to current goal')
+    if (!movement.handlePathUpdate(result)) {
+      logger.throttled('no-path', 5000, 'warn', 'No path to current goal')
+    }
   }
 })
 
@@ -197,6 +208,7 @@ bot.on('kicked', reason => logger.error('Kicked from server', reason))
 bot.on('error', error => logger.error('Mineflayer error', error))
 
 bot.once('end', () => {
+  movement.shutdown()
   arrival.stop()
   companionSession.stop()
   learning.stop()

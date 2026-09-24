@@ -5,7 +5,9 @@ class AutonomyScheduler {
     onRun,
     now = Date.now,
     setIntervalFn = setInterval,
-    clearIntervalFn = clearInterval
+    clearIntervalFn = clearInterval,
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout
   }) {
     this.intervalMs = intervalMs
     this.eventMinGapMs = eventMinGapMs
@@ -13,7 +15,11 @@ class AutonomyScheduler {
     this.now = now
     this.setIntervalFn = setIntervalFn
     this.clearIntervalFn = clearIntervalFn
+    this.setTimeoutFn = setTimeoutFn
+    this.clearTimeoutFn = clearTimeoutFn
     this.timer = null
+    this.pendingTimer = null
+    this.pendingReason = null
     this.running = false
     this.lastStartedAt = -Infinity
   }
@@ -25,13 +31,20 @@ class AutonomyScheduler {
   }
 
   stop() {
-    if (this.timer === null) return false
-    this.clearIntervalFn(this.timer)
+    const wasStarted = this.timer !== null
+    if (wasStarted) this.clearIntervalFn(this.timer)
     this.timer = null
-    return true
+    if (this.pendingTimer !== null) this.clearTimeoutFn(this.pendingTimer)
+    this.pendingTimer = null
+    this.pendingReason = null
+    return wasStarted
   }
 
   trigger(reason) {
+    if (this.running || this.pendingTimer !== null) {
+      this.pendingReason = reason
+      return Promise.resolve(false)
+    }
     if (this.now() - this.lastStartedAt < this.eventMinGapMs) return Promise.resolve(false)
     return this.request(reason)
   }
@@ -45,7 +58,25 @@ class AutonomyScheduler {
       return true
     } finally {
       this.running = false
+      this.#schedulePending()
     }
+  }
+
+  #schedulePending() {
+    if (this.pendingReason === null || this.pendingTimer !== null || this.running) return
+    const delay = Math.max(0, this.eventMinGapMs - (this.now() - this.lastStartedAt))
+    this.pendingTimer = this.setTimeoutFn(() => {
+      this.pendingTimer = null
+      if (this.running) return
+      if (this.now() - this.lastStartedAt < this.eventMinGapMs) {
+        this.#schedulePending()
+        return
+      }
+      const pending = this.pendingReason
+      this.pendingReason = null
+      if (pending !== null) void this.request(pending)
+    }, delay)
+    this.pendingTimer?.unref?.()
   }
 }
 

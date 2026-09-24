@@ -61,3 +61,56 @@ test('event triggers respect their minimum gap', async () => {
   assert.equal(await scheduler.trigger('later'), true)
   assert.equal(runs, 2)
 })
+
+test('goal completion during inference is coalesced and reconsidered after the gap', async () => {
+  let now = 1000
+  let release
+  let pendingTimer
+  const runs = []
+  const scheduler = new AutonomyScheduler({
+    intervalMs: 30000,
+    eventMinGapMs: 10000,
+    now: () => now,
+    setTimeoutFn(callback, delay) { pendingTimer = { callback, delay }; return 1 },
+    clearTimeoutFn() { pendingTimer = null },
+    onRun: async reason => {
+      runs.push(reason)
+      if (reason === 'first') await new Promise(resolve => { release = resolve })
+    }
+  })
+  const first = scheduler.request('first')
+  await scheduler.trigger('goal_finished')
+  await scheduler.trigger('goal_finished')
+  release()
+  await first
+  assert.deepEqual(runs, ['first'])
+  assert.equal(pendingTimer.delay, 10000)
+  now = 11000
+  pendingTimer.callback()
+  await Promise.resolve()
+  assert.deepEqual(runs, ['first', 'goal_finished'])
+  scheduler.stop()
+})
+
+test('stopping scheduler discards a queued goal event', async () => {
+  let release
+  let pendingTimer
+  const runs = []
+  const scheduler = new AutonomyScheduler({
+    intervalMs: 30000,
+    eventMinGapMs: 10000,
+    setTimeoutFn(callback) { pendingTimer = callback; return 1 },
+    clearTimeoutFn() { pendingTimer = null },
+    onRun: async reason => {
+      runs.push(reason)
+      if (reason === 'first') await new Promise(resolve => { release = resolve })
+    }
+  })
+  const first = scheduler.request('first')
+  await scheduler.trigger('goal_finished')
+  release()
+  await first
+  scheduler.stop()
+  assert.equal(pendingTimer, null)
+  assert.deepEqual(runs, ['first'])
+})

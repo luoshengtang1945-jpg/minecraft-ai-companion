@@ -4,7 +4,8 @@ const config = require('../src/config')
 const { OllamaClient } = require('../src/agent/ollama-client')
 const { AutonomyOllamaClient } = require('../src/autonomy/ollama-client')
 const { personality } = require('../src/personality')
-const { isRepeatedReply, hasReversedFollowReply } = require('../src/agent/reply-variety')
+const { isRepeatedReply, hasReversedFollowReply, isStageDirectionReply } = require('../src/agent/reply-variety')
+const { chatReplyIssue } = require('../src/agent/reply-grounding')
 
 async function main() {
   const client = new OllamaClient({ ...config.ollama, debug: false }, null, { info: console.log })
@@ -21,6 +22,7 @@ async function main() {
     assert.ok(['CHAT', 'FOLLOW'].includes(decision.action), 'unexpected action')
     if (!decision.reply) failures.push(`trial ${index + 1}: no usable reply after revision`)
     assert.equal(hasReversedFollowReply('FOLLOW', decision.reply), false, 'follow direction reversed')
+    assert.equal(isStageDirectionReply(decision.reply), false, 'stage direction instead of player-facing speech')
     if (isRepeatedReply(decision.reply, replies)) failures.push(`trial ${index + 1}: repeated reply`)
     replies.push(decision.reply)
   }
@@ -28,6 +30,16 @@ async function main() {
   console.log(JSON.stringify({ input: '你喜欢下雨天吗？', ...preference }))
   assert.equal(preference.action, 'CHAT')
   assert.doesNotMatch(preference.reply, /^在跟着你|^在这等你/, 'status reply instead of responding to topic')
+  for (const input of ['I feel bored', 'What do you want to do?', 'Can you build a house?', 'Do you remember the house we built?']) {
+    // Keep scenarios independent: a previous synthetic question is not evidence
+    // that a house or other shared achievement exists.
+    const scenarioClient = new OllamaClient({ ...config.ollama, debug: false }, null, { info: console.log })
+    const decision = await scenarioClient.decide('TestPlayer', input, JSON.stringify({ companionSession }))
+    console.log(JSON.stringify({ input, ...decision }))
+    assert.equal(decision.action, 'CHAT', `unexpected action for ${input}`)
+    assert.equal(chatReplyIssue(decision.reply, { playerMessage: input }), null, `unsupported or evasive reply for ${input}`)
+    assert.ok(decision.reply.trim(), `empty reply for ${input}`)
+  }
   const autonomy = new AutonomyOllamaClient({ ollama: config.ollama, personality })
   for (let trial = 1; trial <= 2; trial++) {
     const decision = await autonomy.decide({
@@ -52,7 +64,7 @@ async function main() {
   })
   console.log(JSON.stringify({ syntheticEvent: 'quiet automatic companionship for 120s', ...quietDecision }))
   assert.ok(['SAY', 'IDLE'].includes(quietDecision.action), 'automatic following must remain speech-only')
-  console.log('PASS: follow direction, reply variety, topic response and proactive speech (synthetic state only)')
+  console.log('PASS: follow direction, reply variety, grounded open chat and proactive speech (synthetic state only)')
 }
 
 main().catch(error => { console.error(error.message); process.exitCode = 1 })

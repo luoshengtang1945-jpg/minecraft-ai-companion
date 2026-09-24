@@ -2,7 +2,30 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const { EventEmitter } = require('node:events')
 const { recognizeImmediateMovement } = require('../src/agent/immediate-movement')
-const { createAgent } = require('../src/agent')
+const { createAgent, isPlayerChatTranslation } = require('../src/agent')
+
+test('Mineflayer admin command feedback is not treated as player speech', () => {
+  assert.equal(isPlayerChatTranslation('chat.type.admin'), false)
+  assert.equal(isPlayerChatTranslation('<%s> %s'), true)
+  assert.equal(isPlayerChatTranslation(undefined), true)
+
+  const bot = new EventEmitter()
+  bot.username = 'AI_Companion'
+  let spoken = 0
+  let playerEvents = 0
+  bot.chat = () => { spoken += 1 }
+  const agent = createAgent({ bot,
+    movement: { getPlayerCommandEpoch: () => 0 },
+    survival: { observePlayer() { playerEvents += 1 } },
+    logger: { info() {}, error() {} },
+    config: { url: 'http://localhost/test', model: 'test', timeoutMs: 5000 }
+  })
+  agent.start()
+  bot.emit('chat', 'Steve', 'Teleported AI_Companion', 'chat.type.admin')
+  assert.equal(spoken, 0)
+  assert.equal(playerEvents, 0)
+  agent.stop()
+})
 
 test('latency-sensitive Chinese movement commands are recognized without LLM inference', () => {
   assert.equal(recognizeImmediateMovement('跟我来'), 'FOLLOW')
@@ -60,6 +83,62 @@ test('FOLLOW takes locomotion immediately before Ollama responds', async () => {
   } finally {
     global.fetch = originalFetch
   }
+})
+
+test('unavailable FOLLOW target gets one immediate grounded reply without model inference', t => {
+  const originalFetch = global.fetch
+  t.after(() => { global.fetch = originalFetch })
+  global.fetch = () => assert.fail('failed immediate movement should not invoke Ollama')
+  const bot = new EventEmitter()
+  bot.username = 'AI_Companion'
+  const replies = []
+  bot.chat = text => replies.push(text)
+  const agent = createAgent({
+    bot,
+    movement: {
+      getPlayer: () => null,
+      follow: () => false,
+      getPlayerCommandEpoch: () => 0
+    },
+    survival: { observePlayer() {}, cancelPursuit() {} },
+    logger: { info() {}, error() {} },
+    config: { url: 'http://localhost/test', model: 'test', timeoutMs: 5000 }
+  })
+  agent.start()
+  t.after(() => agent.stop())
+  bot.emit('chat', 'Steve', '跟着我')
+  assert.deepEqual(replies, ['我暂时没看到你，靠近点再叫我。'])
+})
+
+test('player FOLLOW cancels an autonomous learning task before taking locomotion', async t => {
+  const originalFetch = global.fetch
+  t.after(() => { global.fetch = originalFetch })
+  global.fetch = async () => ({ ok: true, json: async () => ({ message: { content: '{"action":"CHAT","reply":"好"}' } }) })
+  const bot = new EventEmitter()
+  bot.username = 'AI_Companion'
+  bot.chat = () => {}
+  const order = []
+  let epoch = 0
+  const agent = createAgent({
+    bot,
+    movement: {
+      follow() { order.push('FOLLOW'); epoch += 1; return true },
+      getPlayerCommandEpoch: () => epoch,
+      getBehaviorSummary: () => ({ type: 'FOLLOW', source: 'PLAYER', locomotionOwner: 'PLAYER', username: 'Steve' })
+    },
+    learning: {
+      isAutonomousTaskActive: () => true,
+      cancel(reason) { order.push(`CANCEL:${reason}`); return true }
+    },
+    survival: { observePlayer() {}, cancelPursuit() {} },
+    logger: { info() {}, error() {} },
+    config: { url: 'http://localhost/test', model: 'test', timeoutMs: 5000 }
+  })
+  agent.start()
+  t.after(() => agent.stop())
+  bot.emit('chat', 'Steve', '跟我来')
+  assert.deepEqual(order, ['CANCEL:PLAYER_MOVEMENT_COMMAND', 'FOLLOW'])
+  await new Promise(resolve => setImmediate(resolve))
 })
 
 test('回来 cancels pursuit before inference and invalidates an older pending attack decision', async t => {

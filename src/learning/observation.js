@@ -38,6 +38,19 @@ function entityRef(entity) {
   return `entity:${entity.id}`
 }
 
+function droppedItemSummary(entity) {
+  if (typeof entity?.getDroppedItem !== 'function') return null
+  try {
+    const item = entity.getDroppedItem()
+    if (item && typeof item.name === 'string' && Number.isInteger(item.count) && item.count > 0) {
+      return { name: item.name, count: item.count }
+    }
+  } catch {
+    // Item metadata may arrive after the entity spawn packet.
+  }
+  return null
+}
+
 function parseTargetRef(reference) {
   if (typeof reference !== 'string') return null
   if (reference.startsWith('entity:')) return { kind: 'entity', id: Number(reference.slice(7)) }
@@ -182,26 +195,32 @@ class LearningObservationBuilder {
       .filter(item => item.distance <= this.range)
       .sort((a, b) => a.distance - b.distance)
       .slice(0, this.maxEntities)
-      .map(({ entity, distance }) => ({
-        ref: entityRef(entity),
-        name: entity.name || entity.username || 'unknown',
-        type: entity.type || 'unknown',
-        position: positionOf(entity.position),
-        distance: round(distance)
-      }))
+      .map(({ entity, distance }) => {
+        const droppedItem = droppedItemSummary(entity)
+        return {
+          ref: entityRef(entity),
+          name: entity.name || entity.username || 'unknown',
+          type: entity.type || 'unknown',
+          position: positionOf(entity.position),
+          distance: round(distance),
+          ...(droppedItem ? { droppedItem } : {})
+        }
+      })
   }
 
   #targetState(reference) {
     if (!reference) return null
     const target = this.resolve(reference)
     if (!target) return { ref: reference, exists: false }
+    const droppedItem = droppedItemSummary(target)
     return {
       ref: reference,
       exists: true,
       name: target.name || target.username || 'unknown',
       type: target.type || (reference.startsWith('block:') ? 'block' : 'unknown'),
       position: positionOf(target.position),
-      distance: round(distanceBetween(this.bot.entity?.position, target.position))
+      distance: round(distanceBetween(this.bot.entity?.position, target.position)),
+      ...(droppedItem ? { droppedItem } : {})
     }
   }
 }
@@ -213,5 +232,6 @@ module.exports = {
   parseTargetRef,
   blockRef,
   entityRef,
-  distanceBetween
+  distanceBetween,
+  droppedItemSummary
 }

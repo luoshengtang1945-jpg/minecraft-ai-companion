@@ -32,28 +32,36 @@ function actionShape(action) {
 
 function skillFromSuccessfulEpisode(episode, now = Date.now) {
   if (episode.outcome !== 'SUCCESS' || !episode.hasObjectiveSuccess?.()) return null
-  const steps = episode.attempts.map(attempt => attempt.action)
-  const evidence = episode.attempts.map(attempt => ({
+  // The episode retains every attempt. A reusable candidate contains only
+  // attempts with objective-relevant progress, never failed detours.
+  const contributingAttempts = episode.attempts.filter(attempt =>
+    ['PARTIAL_PROGRESS', 'SUCCESS'].includes(attempt.evaluation?.status))
+  const steps = contributingAttempts.map(attempt => attempt.action)
+  const evidence = contributingAttempts.map(attempt => ({
     target: attempt.observationBefore?.targetState ? {
       name: attempt.observationBefore.targetState.name || null,
-      type: attempt.observationBefore.targetState.type || null
+      type: attempt.observationBefore.targetState.type || null,
+      ...(attempt.observationBefore.targetState.droppedItem?.name
+        ? { droppedItem: attempt.observationBefore.targetState.droppedItem.name } : {})
     } : null,
     evaluation: attempt.evaluation?.status || null
   }))
   if (!steps.length) return null
-  const nearbyBlocks = [...new Set((episode.initialObservation.nearbyBlocks || []).map(block => block.name))].slice(0, 12)
-  const nearbyEntities = [...new Set((episode.initialObservation.nearbyEntities || []).map(entity => entity.name))].slice(0, 8)
+  const targetBlocks = [...new Set(evidence.filter(entry => Number.isInteger(entry.target?.type))
+    .map(entry => entry.target?.name).filter(Boolean))].slice(0, 12)
+  const targetDrops = [...new Set(evidence.map(entry => entry.target?.droppedItem).filter(Boolean))].slice(0, 8)
   const initialInventory = Object.keys(episode.initialObservation.inventory || {}).sort()
   const fingerprint = crypto.createHash('sha256')
     .update(JSON.stringify({
       goal: normalizeGoalPattern(episode.goal),
-      steps: steps.map((step, index) => ({ ...actionShape(step), targetName: evidence[index].target?.name || null }))
+      steps: steps.map((step, index) => ({ ...actionShape(step),
+        targetName: evidence[index].target?.droppedItem || evidence[index].target?.name || null }))
     }))
     .digest('hex').slice(0, 12)
   return {
     id: `learned-${fingerprint}`,
     goalPattern: normalizeGoalPattern(episode.goal),
-    preconditions: { nearbyBlocks, nearbyEntities, initialInventory },
+    preconditions: { targetBlocks, targetDrops, initialInventory },
     steps,
     evidence,
     confidence: 2 / 3,
@@ -71,6 +79,8 @@ class LearningMemoryStore {
     this.now = now
     this.maxEpisodes = maxEpisodes
     this.data = { ...EMPTY_MEMORY, episodes: [], skills: [] }
+    this.saveQueue = Promise.resolve()
+    this.saveSequence = 0
   }
 
   async load() {
@@ -136,10 +146,19 @@ class LearningMemoryStore {
   }
 
   async save() {
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true })
-    const temporary = `${this.filePath}.tmp`
-    await fs.writeFile(temporary, `${JSON.stringify(this.data, null, 2)}\n`, 'utf8')
-    await fs.rename(temporary, this.filePath)
+    const content = `${JSON.stringify(this.data, null, 2)}\n`
+    const sequence = ++this.saveSequence
+    this.saveQueue = this.saveQueue.catch(() => {}).then(async () => {
+      await fs.mkdir(path.dirname(this.filePath), { recursive: true })
+      const temporary = `${this.filePath}.${process.pid}.${sequence}.tmp`
+      try {
+        await fs.writeFile(temporary, content, 'utf8')
+        await fs.rename(temporary, this.filePath)
+      } finally {
+        await fs.unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error })
+      }
+    })
+    return this.saveQueue
   }
 
   #confidence(skill) {

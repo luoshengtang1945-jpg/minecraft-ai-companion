@@ -81,6 +81,13 @@ module.exports = {
     enabled: booleanFromEnv('AUTONOMY_ENABLED', true),
     intervalMs: numberFromEnv('AUTONOMY_INTERVAL_MS', 30000, { min: 5000 }),
     eventMinGapMs: numberFromEnv('AUTONOMY_EVENT_MIN_GAP_MS', 10000, { min: 1000 }),
+    moveTimeoutMs: numberFromEnv('AUTONOMY_MOVE_TIMEOUT_MS', 45000, { min: 10000, max: 120000 }),
+    moveCooldownMs: numberFromEnv('AUTONOMY_MOVE_COOLDOWN_MS', 90000, { min: 0, max: 600000 }),
+    followDurationMs: numberFromEnv('AUTONOMY_FOLLOW_DURATION_MS', 120000, { min: 30000, max: 600000 }),
+    followCooldownMs: numberFromEnv('AUTONOMY_FOLLOW_COOLDOWN_MS', 180000, { min: 0, max: 1200000 }),
+    taskLearningEnabled: booleanFromEnv('AUTONOMOUS_LEARNING_ENABLED', false),
+    taskMaxEpisodes: numberFromEnv('AUTONOMOUS_LEARNING_MAX_EPISODES', 1, { min: 1, max: 5 }),
+    taskMinHealth: numberFromEnv('AUTONOMOUS_LEARNING_MIN_HEALTH', 12, { min: 1, max: 20 }),
     speechCooldownMs: numberFromEnv('AUTONOMY_SPEECH_COOLDOWN_MS', 60000, { min: 5000 }),
     speechDedupMs: numberFromEnv('AUTONOMY_SPEECH_DEDUP_MS', 300000, { min: 10000 }),
     maxPlayerDistance: numberFromEnv('AUTONOMY_MAX_PLAYER_DISTANCE', 16, { min: 6, max: 32 }),
@@ -99,7 +106,7 @@ module.exports = {
     maxPlayerDistance: numberFromEnv('AUTONOMY_MAX_PLAYER_DISTANCE', 16, { min: 6, max: 32 })
   },
   companionship: {
-    enabled: booleanFromEnv('AUTO_ACCOMPANY_ENABLED', true),
+    enabled: booleanFromEnv('AUTO_ACCOMPANY_ENABLED', false),
     delayMs: numberFromEnv('AUTO_ACCOMPANY_DELAY_MS', 3500, { min: 1000, max: 30000 }),
     range: numberFromEnv('AUTO_ACCOMPANY_RANGE', 16, { min: 3, max: 24 })
   },
@@ -112,6 +119,7 @@ module.exports = {
     observationRange: numberFromEnv('LEARNING_OBSERVATION_RANGE', 8, { min: 3, max: 16 }),
     exploreRadius: numberFromEnv('LEARNING_EXPLORE_RADIUS', 16, { min: 8, max: 32 }),
     moveTimeoutMs: numberFromEnv('LEARNING_MOVE_TIMEOUT_MS', 20000, { min: 1000, max: 120000 }),
+    observationSettleMs: numberFromEnv('LEARNING_OBSERVATION_SETTLE_MS', 300, { min: 0, max: 1500 }),
     memoryFile: path.resolve(process.cwd(), process.env.LEARNING_MEMORY_FILE || 'learning-memory/memory.json')
   },
   vision: {

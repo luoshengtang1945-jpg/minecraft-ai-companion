@@ -84,8 +84,9 @@ class CompanionSessionContext {
     return {
       source: 'SHORT_TERM_SYMBOLIC_OBSERVATIONS',
       behavior,
-      world: { timeOfDay: this.bot.time?.timeOfDay ?? null, raining: this.bot.isRaining ?? null, isDay: this.bot.time?.isDay ?? null },
-      companion: { health: this.bot.health ?? null, sleeping: Boolean(this.bot.isSleeping) },
+      world: { timeOfDay: this.bot.time?.timeOfDay ?? null, raining: this.bot.isRaining ?? null, isDay: this.bot.time?.isDay ?? null,
+        dimension: this.bot.game?.dimension ?? null, thunderState: this.bot.thunderState ?? null },
+      companion: { health: this.bot.health ?? null, sleeping: typeof this.bot.isSleeping === 'boolean' ? this.bot.isSleeping : null },
       playerCommitment: behavior.source === 'PLAYER' ? behavior.type : null,
       interruptedBySurvival: behavior.locomotionOwner === 'SURVIVAL',
       speech: this.speechReadiness(),

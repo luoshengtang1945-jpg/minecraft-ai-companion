@@ -21,6 +21,13 @@ function targetChanged(before, after) {
   return JSON.stringify(before?.targetState || null) !== JSON.stringify(after?.targetState || null)
 }
 
+function observedGoalEvidence(observation, item) {
+  if (!item) return new Set()
+  const entries = [...(observation?.nearbyBlocks || []), ...(observation?.nearbyEntities || [])]
+  return new Set(entries.filter(entry => entry?.name === item || entry?.droppedItem?.name === item)
+    .map(entry => entry.ref).filter(Boolean))
+}
+
 function evaluateAttempt({ goal, initialObservation, observationBefore, observationAfter, actionResult }) {
   if (objectiveSatisfied(goal, observationAfter, initialObservation)) {
     return { status: EVALUATION.SUCCESS, reason: 'Objective confirmed by observed inventory' }
@@ -33,14 +40,22 @@ function evaluateAttempt({ goal, initialObservation, observationBefore, observat
   const beforeCount = item ? itemCount(observationBefore, item) : 0
   const afterCount = item ? itemCount(observationAfter, item) : 0
   const targetItemDelta = item ? (observationAfter?.inventoryDelta?.[item] || afterCount - beforeCount) : 0
+  const beforeEvidence = observedGoalEvidence(observationBefore, item)
+  const afterEvidence = observedGoalEvidence(observationAfter, item)
+  const newGoalEvidence = [...afterEvidence].some(ref => !beforeEvidence.has(ref))
   if (actionResult.reason === 'SYMBOLIC_DISCOVERY') {
     const beforeRefs = new Set([...(observationBefore.nearbyBlocks || []), ...(observationBefore.nearbyEntities || [])].map(entry => entry.ref))
     const after = [...(observationAfter.nearbyBlocks || []), ...(observationAfter.nearbyEntities || [])]
     const confirmed = (actionResult.evidence || []).some(evidence => !beforeRefs.has(evidence.ref) && after.some(entry => entry.ref === evidence.ref && entry.name === evidence.name))
-    if (confirmed) return { status: EVALUATION.PARTIAL_PROGRESS, reason: 'New watched symbolic evidence confirmed; replan intention' }
+    if (confirmed && newGoalEvidence) {
+      return { status: EVALUATION.PARTIAL_PROGRESS, reason: 'New objective-item evidence confirmed; replan intention' }
+    }
   }
-  if (targetItemDelta > 0 || targetChanged(observationBefore, observationAfter)) {
-    return { status: EVALUATION.PARTIAL_PROGRESS, reason: 'Observed state changed but objective is not complete' }
+  const relevantTargetChanged = targetChanged(observationBefore, observationAfter) &&
+    [observationBefore?.targetState, observationAfter?.targetState]
+      .some(target => target?.name === item || target?.droppedItem?.name === item)
+  if (targetItemDelta > 0 || newGoalEvidence || relevantTargetChanged) {
+    return { status: EVALUATION.PARTIAL_PROGRESS, reason: 'Objective-relevant evidence changed but objective is not complete' }
   }
   return { status: EVALUATION.NO_PROGRESS, reason: 'No objective-relevant change was observed' }
 }

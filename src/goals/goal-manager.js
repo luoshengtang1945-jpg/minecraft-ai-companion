@@ -70,8 +70,9 @@ class GoalManager extends EventEmitter {
     return { accepted: true, deferred: false, goal }
   }
 
-  complete(goalId, status = GOAL_STATES.COMPLETED) {
+  complete(goalId, status = GOAL_STATES.COMPLETED, result = null) {
     if (!this.current || this.current.id !== goalId) return false
+    if (result) this.current.result = result
     this.#finish(this.current, status)
     this.current = null
     this.#resumeNext()

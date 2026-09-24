@@ -1,3 +1,7 @@
+const { checkWorldClaim } = require('../agent/world-claims')
+const { speechTopic } = require('./speech-topic')
+const { proactiveClaimIssue } = require('./proactive-claims')
+
 class SpeechController {
   constructor(bot, { cooldownMs, dedupMs, logger, now = Date.now, session = null }) {
     this.session = session
@@ -11,15 +15,18 @@ class SpeechController {
     this.lastResult = null
   }
 
-  say(text, key = text) {
+  say(text, key = text, state = null) {
     const message = typeof text === 'string' ? text.replace(/\s+/g, ' ').trim().slice(0, 220) : ''
     if (!message) return this.#reject('EMPTY_MESSAGE')
+    if (!checkWorldClaim(message, this.bot).valid) return this.#reject('UNSUPPORTED_WORLD_CLAIM')
+    const claimIssue = proactiveClaimIssue(message, state)
+    if (claimIssue) return this.#reject(claimIssue)
     if (this.session && !this.session.canSpeakProactively(message)) return this.#reject(this.session.speechReadiness(message).reason)
 
     const now = this.now()
     if (now - this.lastSpokenAt < this.cooldownMs) return this.#reject('SPEECH_COOLDOWN')
 
-    const normalized = String(key || message).toLowerCase().replace(/\s+/g, ' ').trim()
+    const normalized = speechTopic(message) || String(key || message).toLowerCase().replace(/\s+/g, ' ').trim()
     if (now - (this.recent.get(normalized) ?? -Infinity) < this.dedupMs) return this.#reject('TOPIC_DEDUP')
 
     this.lastSpokenAt = now

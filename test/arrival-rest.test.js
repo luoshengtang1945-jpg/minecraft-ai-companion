@@ -49,6 +49,16 @@ test('arrival starts one persistent autonomous FOLLOW without any model request'
   assert.equal(f.goals.at(-1).dynamic, true)
 })
 
+test('disabled arrival leaves movement free for autonomous presence', () => {
+  const f = fixture()
+  f.arrival.config.enabled = false
+  f.arrival.start()
+  assert.equal(f.arrival.started, false)
+  assert.equal(f.arrival.tryAccompany(), false)
+  assert.equal(f.goals.length, 0)
+  assert.equal(f.movement.getBehaviorSummary().locomotionOwner, 'NONE')
+})
+
 test('STOP before arrival permanently invalidates that arrival intention', () => {
   const f = fixture()
   f.arrival.start()

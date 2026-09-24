@@ -1,7 +1,11 @@
 const { validatePrimitiveAction } = require('./action-schema')
-const { distanceBetween } = require('./observation')
+const { distanceBetween, droppedItemSummary } = require('./observation')
 const { selectExplorationDestination } = require('./exploration')
 const { IntentionMonitor } = require('./intention-monitor')
+
+function explorationMoveTimeoutMs(baseMs, distance) {
+  return Math.max(baseMs, Math.min(60000, distance * 2500))
+}
 
 const IMMUTABLE_BLOCKS = new Set(['bedrock', 'barrier', 'end_portal', 'end_portal_frame'])
 
@@ -69,7 +73,13 @@ class PrimitiveActionExecutor {
         await this.bot.lookAt(target.position, true)
         return { success: true, reason: 'LOOKED_AT_TARGET' }
       }
-      if (action.action === 'MOVE_NEAR') return await this.#moveNear(target, action.distance, isCancelled, monitoring)
+      if (action.action === 'MOVE_NEAR') {
+        const effectiveDistance = action.target.startsWith('block:') ? Math.min(action.distance, 3.5) : action.distance
+        const result = await this.#moveNear(target, effectiveDistance, isCancelled, monitoring)
+        return effectiveDistance === action.distance ? result : {
+          ...result, requestedDistance: action.distance, effectiveDistance
+        }
+      }
       if (action.action === 'ATTACK_ENTITY') return await this.#attack(target)
       if (action.action === 'DIG_BLOCK') return await this.#dig(target, isCancelled)
       return { success: false, reason: 'INVALID_ACTION' }
@@ -81,7 +91,8 @@ class PrimitiveActionExecutor {
   async #explore(action, explorationState, isCancelled, monitoring) {
     const destination = selectExplorationDestination(this.bot, action, explorationState)
     if (!destination) return { success: false, reason: 'NO_SAFE_EXPLORATION_DESTINATION' }
-    const movementResult = await this.#moveNear({ position: destination }, 1, isCancelled, monitoring)
+    const movementResult = await this.#moveNear({ position: destination }, 1, isCancelled,
+      { ...monitoring, maxMoveMs: explorationMoveTimeoutMs(this.moveTimeoutMs, action.distance) })
     return {
       ...movementResult,
       destination: { x: destination.x, y: destination.y, z: destination.z },
@@ -90,9 +101,11 @@ class PrimitiveActionExecutor {
     }
   }
 
-  async #moveNear(target, distance, isCancelled, { monitor = null, explorationState = null, goal = null } = {}) {
+  async #moveNear(target, distance, isCancelled, { monitor = null, explorationState = null, goal = null, maxMoveMs = this.moveTimeoutMs } = {}) {
     if (!this.bot.entity?.position) return { success: false, reason: 'BOT_POSITION_UNAVAILABLE' }
-    if (!this.movement.startLearningMovement(target.position, distance)) {
+    const droppedItem = droppedItemSummary(target)
+    const pathDistance = droppedItem ? Math.max(0.5, distance - 0.5) : distance
+    if (!this.movement.startLearningMovement(target.position, pathDistance)) {
       return { success: false, reason: 'LOCOMOTION_NOT_AVAILABLE' }
     }
     if (distanceBetween(this.bot.entity.position, target.position) <= distance) {
@@ -102,9 +115,10 @@ class PrimitiveActionExecutor {
 
     return await new Promise(resolve => {
       let settled = false
-      let remainingMs = this.moveTimeoutMs
+      let remainingMs = maxMoveMs
       let lastCheckedAt = this.now()
       let nextObservationAt = lastCheckedAt + 750
+      let tightenedItemPath = false
       const commandEpoch = this.movement.getPlayerCommandEpoch?.()
       const finish = result => {
         if (settled) return
@@ -117,8 +131,16 @@ class PrimitiveActionExecutor {
       }
       const onReached = () => {
         if (!this.movement.isLearningLocomotionOwner()) return
-        if (distanceBetween(this.bot.entity?.position, target.position) <= distance + 0.75) {
+        const actualDistance = distanceBetween(this.bot.entity?.position, target.position)
+        if (actualDistance <= distance + (droppedItem ? 0.1 : 0.75)) {
           finish({ success: true, reason: 'REACHED_TARGET' })
+        } else if (droppedItem && !tightenedItemPath) {
+          tightenedItemPath = true
+          if (!this.movement.startLearningMovement(target.position, 0)) {
+            finish({ success: false, reason: 'COULD_NOT_TIGHTEN_ITEM_APPROACH' })
+          }
+        } else if (droppedItem) {
+          finish({ success: false, reason: 'ITEM_STILL_OUT_OF_REACH' })
         }
       }
       const onPathUpdate = result => {
@@ -216,4 +238,4 @@ class PrimitiveActionExecutor {
   }
 }
 
-module.exports = { PrimitiveActionExecutor, IMMUTABLE_BLOCKS }
+module.exports = { PrimitiveActionExecutor, IMMUTABLE_BLOCKS, explorationMoveTimeoutMs }

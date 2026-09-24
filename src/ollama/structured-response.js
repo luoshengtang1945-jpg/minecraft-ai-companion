@@ -63,7 +63,8 @@ function parseStructuredContent(content, validate) {
       surroundingText: candidate.surroundingText
     }
   } catch (error) {
-    throw new StructuredResponseError(STRUCTURED_RESPONSE_STATUS.SCHEMA_INVALID, `Schema validation failed: ${error.message}`)
+    throw new StructuredResponseError(STRUCTURED_RESPONSE_STATUS.SCHEMA_INVALID,
+      `Schema validation failed: ${error.message}`, { rejectedJson: safePreview(candidate.text, 500) })
   }
 }
 
@@ -96,12 +97,20 @@ async function requestStructured({
   debug = ollama.debug ?? false,
   rawMaxChars = ollama.debugRawMaxChars ?? 2000
 }) {
+  let lastRecoverableStatus = null
   const runAttempt = async attempt => {
     const execute = async ({ signal }) => {
       const timed = signalWithTimeout(signal, ollama.timeoutMs)
       try {
         let response
         try {
+          const requestMessages = messages || [
+            { role: 'system', content: system },
+            { role: 'user', content: JSON.stringify(payload) }
+          ]
+          const retryMessages = attempt > 0 && lastRecoverableStatus
+            ? [...requestMessages, { role: 'user', content: `Previous response was ${lastRecoverableStatus}. Return one COMPLETE JSON object matching the supplied schema; no markdown, prose, or unfinished field.` }]
+            : requestMessages
           response = await fetchFn(ollama.url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -115,10 +124,7 @@ async function requestStructured({
               think: ollama.think ?? false,
               format: schema,
               options: { temperature },
-              messages: messages || [
-                { role: 'system', content: system },
-                { role: 'user', content: JSON.stringify(payload) }
-              ]
+              messages: retryMessages
             })
           })
         } catch (error) {
@@ -177,7 +183,7 @@ async function requestStructured({
           evalCount: envelope.eval_count ?? null
         }
         if (debug) {
-          logger?.info(`[OLLAMA] ${label} HTTP ${response.status}; body=${metadata.bodyBytes}B content=${metadata.contentLength} thinking=${metadata.thinkingLength}`)
+          logger?.info(`[OLLAMA] ${label} HTTP ${response.status}; body=${metadata.bodyBytes}B content=${metadata.contentLength} thinking=${metadata.thinkingLength} done=${metadata.doneReason || 'unknown'} eval=${metadata.evalCount ?? 'unknown'}`)
           logger?.info(`[OLLAMA] ${label} raw content`, safePreview(content, rawMaxChars))
           if (thinking) logger?.info(`[OLLAMA] ${label} raw thinking`, safePreview(thinking, rawMaxChars))
         }
@@ -236,8 +242,9 @@ async function requestStructured({
       if (isOllamaPreempted(error) || error.status === STRUCTURED_RESPONSE_STATUS.ABORTED) throw error
       const retryable = [STRUCTURED_RESPONSE_STATUS.EMPTY_RESPONSE, STRUCTURED_RESPONSE_STATUS.INVALID_JSON].includes(error.status)
       if (!retryable || attempt >= retries) throw error
+      lastRecoverableStatus = error.status
       const description = error.status === STRUCTURED_RESPONSE_STATUS.EMPTY_RESPONSE ? 'empty response' : 'invalid JSON'
-      logger?.warn?.(`[OLLAMA] ${label} ${description}; retry ${attempt + 1}/${retries}`)
+      logger?.warn?.(`[OLLAMA] ${label} ${description}${error.details?.doneReason ? ` (done=${error.details.doneReason})` : ''}; retry ${attempt + 1}/${retries}`)
       await wait(backoffMs * (attempt + 1))
     }
   }

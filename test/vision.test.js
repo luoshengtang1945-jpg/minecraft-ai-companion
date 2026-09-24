@@ -11,10 +11,61 @@ const {
   VisionFrameServer,
   isLoopback,
   hasUploadCapacity,
-  requiresVisualContext
+  requiresVisualContext,
+  isVisualFollowUp
 } = require('../src/vision')
+const { conversationVisualContext } = require('../src/vision/conversation-routing')
 const { PrimitiveActionExecutor, validatePrimitiveAction } = require('../src/learning')
 const { OllamaRequestScheduler, OllamaRequestPreemptedError } = require('../src/ollama')
+const { guardVisualObservation } = require('../src/vision/observation-guard')
+
+test('visual dimension guard rejects confident Nether hallucination in overworld', () => {
+  const mistaken = {
+    sceneType: 'NETHER', summary: 'Nether with glowing entities',
+    salientObjects: [{ label: 'Glowing entities', region: 'MID', confidence: 0.99 }, { label: 'grass', region: 'NEAR', confidence: 0.95 }],
+    structures: [{ label: 'boat', region: 'LEFT', confidence: 0.9 }], terrain: [], hazards: [],
+    playerActivity: { visible: false, description: '', confidence: 0.99 },
+    uncertainty: [], notableChanges: []
+  }
+  const result = guardVisualObservation(mistaken, { dimension: 'minecraft:overworld' })
+  assert.equal(result.rejected, true)
+  assert.equal(result.observation.sceneType, 'UNKNOWN')
+  assert.deepEqual(result.observation.salientObjects.map(item => item.label), ['grass'])
+  assert.deepEqual(result.observation.structures, [])
+  assert.deepEqual(result.observation.terrain, [])
+  assert.equal(guardVisualObservation(mistaken, { dimension: 'minecraft:the_nether' }).rejected, false)
+  assert.equal(guardVisualObservation(mistaken, {}).rejected, false)
+})
+
+test('dimension guard retains plain observed color and shape despite a wrong scene label', () => {
+  const mistaken = {
+    sceneType: 'NETHER', summary: 'A Nether scene',
+    salientObjects: [
+      { label: 'blue cube', region: 'RIGHT', confidence: 0.95 },
+      { label: 'brown block', region: 'LEFT', confidence: 0.9 },
+      { label: 'ice block', region: 'RIGHT', confidence: 0.95 },
+      { label: 'glowing mob', region: 'MID', confidence: 0.99 }
+    ],
+    structures: [], terrain: [], hazards: [],
+    playerActivity: { visible: false, description: '', confidence: 0.9 },
+    uncertainty: [], notableChanges: []
+  }
+  const guarded = guardVisualObservation(mistaken, { dimension: 'minecraft:overworld' })
+  assert.equal(guarded.observation.sceneType, 'UNKNOWN')
+  assert.deepEqual(guarded.observation.salientObjects.map(item => item.label), ['blue cube', 'brown block'])
+})
+
+test('visual conversation does not promote an uncorroborated animal guess', () => {
+  const observation = visual({ salientObjects: [
+    { label: 'sheep', region: 'RIGHT', confidence: 0.95 },
+    { label: 'grass', region: 'CENTER', confidence: 0.9 }
+  ] })
+  const world = { getVisual: () => ({ source: 'OBSERVED_VISUALLY', frame: { id: 'f1', perspective: 'COMPANION_CAMERA' }, ageMs: 50, observation }) }
+  const context = conversationVisualContext(world, { entities: { 1: { name: 'chicken' } } })
+  assert.deepEqual(context.salientObjects.map(item => item.label), ['grass'])
+  const confirmed = conversationVisualContext(world, { entities: { 1: { name: 'sheep' } } })
+  assert.deepEqual(confirmed.salientObjects.map(item => item.label), ['sheep', 'grass'])
+})
 
 function png(width = 320, height = 180, size = 64) {
   const value = Buffer.alloc(Math.max(24, size))
@@ -132,6 +183,28 @@ test('fused world model keeps symbolic and visual sources distinct and expires v
   assert.equal(model.getVisual(), null)
 })
 
+test('companion camera frames retain their own perspective and pose through perception', async () => {
+  const now = 1000
+  const store = new FrameStore({ now: () => now })
+  const accepted = store.accept(png(), {
+    id: 'companion', capturedAt: now, perspective: 'COMPANION_CAMERA', uiState: 'GAMEPLAY',
+    camera: { x: 4, y: 70, z: -2, yaw: 90, pitch: 0 }, dimension: 'minecraft:overworld'
+  })
+  const model = new MultimodalWorldModel({ now: () => now })
+  const controller = new VisualPerceptionController({
+    frameStore: store, worldModel: model, logger, now: () => now,
+    client: { observe: async frame => {
+      assert.equal(frame.perspective, 'COMPANION_CAMERA')
+      return visual()
+    } },
+    config: { enabled: true, frameMaxAgeMs: 1000, freshFrameMs: 1000, backgroundCooldownMs: 1000 }
+  })
+  assert.equal(accepted.accepted, true)
+  assert.equal((await controller.request({ priority: 'TASK' })).status, 'UPDATED')
+  assert.equal(model.getVisual().frame.perspective, 'COMPANION_CAMERA')
+  assert.equal(model.getVisual().frame.camera.x, 4)
+})
+
 test('LOOK_VISUALLY is validated and updates perception without touching locomotion', async () => {
   assert.equal(validatePrimitiveAction({ action: 'LOOK_VISUALLY' }).action, 'LOOK_VISUALLY')
   let movementCalls = 0
@@ -227,6 +300,15 @@ test('newer gameplay frame alone does not invalidate a completed background obse
 test('conversation routing requests vision only for genuinely visual questions', () => {
   assert.equal(requiresVisualContext('你看到前面那个东西了吗？'), true)
   assert.equal(requiresVisualContext('你觉得这里像不像一个矿洞入口？'), true)
+  assert.equal(requiresVisualContext('你面前是什么'), true)
+  assert.equal(requiresVisualContext('你描述一下你的视角'), true)
+  assert.equal(requiresVisualContext('你现在看到什么'), true)
+  assert.equal(requiresVisualContext('你现在看到的是什么'), true)
+  assert.equal(requiresVisualContext('你看到了什么'), true)
+  assert.equal(requiresVisualContext('你觉得这里怎么样'), true)
+  assert.equal(isVisualFollowUp('现在呢'), true)
+  assert.equal(isVisualFollowUp('再看一次'), true)
+  assert.equal(isVisualFollowUp('跟我来'), false)
   assert.equal(requiresVisualContext('今天过得怎么样？'), false)
 })
 
@@ -269,4 +351,19 @@ test('vision client sends the real PNG through Ollama images rather than a text 
   assert.equal(body.model, 'qwen3-vl:8b')
   assert.equal(body.messages[1].images.length, 1)
   assert.equal(Buffer.from(body.messages[1].images[0], 'base64').equals(png()), true)
+})
+
+test('visual inference never includes the previous scene description with a new image', async () => {
+  const store = new FrameStore({ now: () => 1000 })
+  let body
+  const client = new VisionOllamaClient({
+    ollama: { url: 'http://127.0.0.1:11434/api/chat', model: 'test', timeoutMs: 1000, responseRetries: 0, think: false },
+    scheduler: null, logger,
+    fetchFn: async (_url, request) => {
+      body = JSON.parse(request.body)
+      return { ok: true, status: 200, text: async () => JSON.stringify({ message: { content: JSON.stringify(visual()) } }) }
+    }
+  })
+  await client.observe(frame(store), { kind: 'TASK_VISUAL_PERCEPTION', previousObservation: { summary: 'old red bed and panda egg', sceneType: 'INTERIOR' } })
+  assert.doesNotMatch(JSON.stringify(body.messages), /old red bed|panda egg|previousObservation/)
 })

@@ -2,6 +2,7 @@ const fs = require('node:fs/promises')
 const path = require('node:path')
 const { isOllamaPreempted } = require('../ollama')
 const { signatureDistance } = require('./frame-store')
+const { guardVisualObservation } = require('./observation-guard')
 
 const REQUEST_KINDS = Object.freeze({
   PLAYER: 'PLAYER_VISUAL_PERCEPTION',
@@ -33,7 +34,7 @@ class VisualPerceptionController {
     if (!this.config.enabled || this.timer) return
     this.timer = this.setIntervalFn(() => {
       void this.request({ priority: 'BACKGROUND', trigger: 'INTERVAL' })
-      this.logger?.throttled?.('vision-metrics', 30000, 'info', `[VISION] metrics ${JSON.stringify(this.snapshot())}`)
+      this.logger?.throttled?.('vision-metrics', 60000, 'info', `[VISION] metrics ${JSON.stringify(this.snapshot())}`)
     }, Math.min(1000, this.config.backgroundIntervalMs))
   }
 
@@ -95,8 +96,9 @@ class VisualPerceptionController {
     this.dirty = false
     this.logger?.info('[VISION] inference started')
     try {
-      const previous = this.worldModel.getVisual({ allowStale: true })?.observation || null
-      const observation = await this.client.observe(frame, { kind, trigger, previousObservation: previous })
+      const rawObservation = await this.client.observe(frame, { kind, trigger })
+      const { observation, rejected } = guardVisualObservation(rawObservation, frame)
+      if (rejected) this.logger?.info(`[VISION] rejected scene classification conflicting with ${frame.dimension}`)
       const latest = this.frameStore.getLatest()
       const newerAccepted = this.worldModel.getVisual({ allowStale: true })?.frame.capturedAt > frame.capturedAt
       if (newerAccepted || this.now() - frame.capturedAt > this.config.frameMaxAgeMs ||

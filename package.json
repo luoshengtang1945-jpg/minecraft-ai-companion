@@ -10,6 +10,7 @@
     "smoke:learning": "node scripts/smoke-learning-ollama.js --count=1",
     "reliability:learning": "node scripts/smoke-learning-ollama.js --count=20",
     "coherence:learning": "node scripts/test-learning-coherence.js --count=10",
+    "simulate:learning": "node scripts/simulate-learning-episode.js",
     "benchmark:vision": "node benchmark/vision/run.js",
     "diagnose:ollama": "node scripts/diagnose-ollama-response.js"
   },

@@ -9,11 +9,13 @@ const { EVALUATION, objectiveSatisfied, evaluateAttempt } = require('./evaluator
 const { ACTION_TYPES, validatePrimitiveAction, parsePrimitiveAction } = require('./action-schema')
 const { EpisodeExplorationState } = require('./exploration-state')
 const { destinationForHeading, selectExplorationDestination } = require('./exploration')
+const { createItemGoal } = require('./item-goal')
 
 module.exports = {
   LearningController,
   OAK_LOG_EXPERIMENT,
   createOakLogGoal,
+  createItemGoal,
   LearningObservationBuilder,
   PrimitiveActionExecutor,
   LearningMemoryStore,

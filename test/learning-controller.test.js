@@ -60,6 +60,18 @@ function createFixture(overrides = {}) {
   return { options: { ...base, ...overrides }, movement, saved, setInventory(value) { inventory = value } }
 }
 
+test('autonomous learning decisions use lower model priority than player tasks', async () => {
+  const kinds = []
+  const client = new LearningOllamaClient({
+    ollama: { url: 'http://localhost/test', model: 'test', timeoutMs: 1000, responseRetries: 0 },
+    scheduler: { schedule(kind) { kinds.push(kind); return Promise.reject(new Error('probe')) } }
+  })
+  const context = { observation: {}, attempts: [], learnedSkills: [] }
+  await assert.rejects(client.decide({ ...context, goal: { source: 'AUTONOMOUS' } }), /probe/)
+  await assert.rejects(client.decide({ ...context, goal: { source: 'PLAYER_TASK' } }), /probe/)
+  assert.deepEqual(kinds, ['AUTONOMOUS_TASK_DECISION', 'PLAYER_TASK_DECISION'])
+})
+
 test('survival preempts learning and the stale decision is not executed', async () => {
   const fixture = createFixture()
   let releaseFirst
@@ -126,6 +138,109 @@ test('TASK_GOAL starts a PLAYER_TASK learning episode', async () => {
   assert.equal(episode.goal.requestedBy, 'Steve')
   assert.equal(episode.outcome, 'SUCCESS')
   assert.equal(fixture.saved[0].goal.source, 'PLAYER_TASK')
+})
+
+test('successful block interaction allows a brief server pickup update before objective evaluation', async () => {
+  const fixture = createFixture()
+  let settleCalls = 0
+  fixture.options.client = { async decide() { return { action: 'DIG_BLOCK', target: 'block:1,64,0' } } }
+  fixture.options.executor = { async execute() { return { success: true, reason: 'DIG_COMPLETED' } } }
+  fixture.options.sleep = async duration => {
+    if (duration === 300) {
+      settleCalls += 1
+      fixture.setInventory({ oak_log: 1 })
+    }
+  }
+  const episode = await new LearningController(fixture.options).runExperiment()
+  assert.equal(episode.outcome, 'SUCCESS')
+  assert.equal(settleCalls, 1)
+  assert.equal(episode.attempts[0].observationAfter.inventoryDelta.oak_log, 1)
+})
+
+test('grounded reflection receives the actual primitive result reason', async () => {
+  const fixture = createFixture()
+  let reflected = null
+  fixture.options.executor = { async execute() { return { success: true, reason: 'ALREADY_NEAR_TARGET' } } }
+  fixture.options.client = {
+    async decide() { return { action: 'OBSERVE' } },
+    async reflect(context) {
+      reflected = context
+      return { reflection: 'No change.', lesson: 'Distance was already satisfied.', nextApproach: 'Try another primitive.' }
+    }
+  }
+  fixture.options.config = { ...fixture.options.config, maxActions: 1 }
+  await new LearningController(fixture.options).runExperiment()
+  assert.equal(reflected.actionResult.reason, 'ALREADY_NEAR_TARGET')
+})
+
+test('approaching an observed dropped item allows pickup evidence to arrive before evaluation', async () => {
+  const fixture = createFixture()
+  let count = 0
+  let settleCalls = 0
+  fixture.options.observer = { capture({ previousInventory = null } = {}) {
+    const inventory = count ? { oak_log: count } : {}
+    return {
+      inventory,
+      inventoryDelta: { ...(previousInventory && count > (previousInventory.oak_log || 0) ? { oak_log: count - (previousInventory.oak_log || 0) } : {}) },
+      nearbyBlocks: [],
+      nearbyEntities: [{ ref: 'entity:7', name: 'item', droppedItem: { name: 'oak_log', count: 1 } }]
+    }
+  } }
+  fixture.options.client = { async decide() { return { action: 'MOVE_NEAR', target: 'entity:7', distance: 1 } } }
+  fixture.options.executor = { async execute() { return { success: true, reason: 'REACHED_TARGET' } } }
+  fixture.options.sleep = async duration => {
+    if (duration === 300) { settleCalls += 1; count = 1 }
+  }
+  const episode = await new LearningController(fixture.options).runExperiment()
+  assert.equal(episode.outcome, 'SUCCESS')
+  assert.equal(settleCalls, 1)
+  assert.equal(episode.attempts[0].observationAfter.inventoryDelta.oak_log, 1)
+})
+
+test('post-action settling cannot turn a result beyond the episode deadline into success', async () => {
+  const fixture = createFixture()
+  let time = 0
+  fixture.options.now = () => time
+  fixture.options.config = { ...fixture.options.config, maxDurationMs: 100, observationSettleMs: 300 }
+  fixture.options.client = { async decide() { return { action: 'DIG_BLOCK', target: 'block:1,64,0' } } }
+  fixture.options.executor = { async execute() { return { success: true, reason: 'DIG_COMPLETED' } } }
+  fixture.options.sleep = async duration => {
+    if (duration === 300) { time = 101; fixture.setInventory({ oak_log: 1 }) }
+  }
+  const episode = await new LearningController(fixture.options).runExperiment()
+  assert.equal(episode.outcome, 'FAILURE')
+  assert.equal(episode.terminationReason, 'TIME_BUDGET_EXCEEDED')
+})
+
+test('finishing an old episode does not unsuppress autonomy over a queued player task', async () => {
+  const fixture = createFixture()
+  const suppression = []
+  let releaseFirstSave
+  let firstSaveStarted
+  const firstSave = new Promise(resolve => { firstSaveStarted = resolve })
+  let saves = 0
+  fixture.options.autonomy = { setSuppressed(value) { suppression.push(value) } }
+  fixture.options.memory = {
+    async load() {}, findRelevantSkills: () => [],
+    async recordEpisode() {
+      saves += 1
+      if (saves === 1) {
+        firstSaveStarted()
+        await new Promise(resolve => { releaseFirstSave = resolve })
+      }
+      return null
+    }
+  }
+  const controller = new LearningController(fixture.options)
+  const old = controller.runExperiment()
+  await firstSave
+  const player = controller.startPlayerTask({ username: 'Steve', message: '帮我弄点木头' })
+  releaseFirstSave()
+  await old
+  assert.equal(controller.pendingPlayerTask !== null, true)
+  assert.equal(suppression.at(-1), true)
+  await player
+  assert.equal(suppression.at(-1), false)
 })
 
 test('CANCEL_TASK cancels a pending player task before it acquires locomotion', async () => {
@@ -248,6 +363,27 @@ test('learning episode survives a recoverable empty model response', async () =>
   assert.equal(calls, 2)
   assert.equal(episode.outcome, 'SUCCESS')
   assert.equal(episode.attempts.length, 1)
+})
+
+test('truncated optional reflection does not erase a real action or end the episode', async () => {
+  const fixture = createFixture()
+  let actions = 0
+  fixture.options.client = {
+    async decide() { return { action: 'OBSERVE' } },
+    async reflect() {
+      throw new StructuredResponseError(STRUCTURED_RESPONSE_STATUS.INVALID_JSON, 'truncated reflection')
+    }
+  }
+  fixture.options.executor = { async execute() {
+    actions += 1
+    if (actions === 2) fixture.setInventory({ oak_log: 1 })
+    return { success: true, reason: 'OBSERVATION_CAPTURED' }
+  } }
+  const episode = await new LearningController(fixture.options).runExperiment()
+  assert.equal(episode.outcome, 'SUCCESS')
+  assert.equal(episode.attempts.length, 2)
+  assert.equal(episode.attempts[0].reflection, null)
+  assert.equal(episode.attempts[0].evaluation.status, 'NO_PROGRESS')
 })
 
 test('controller preserves the model decision after supplying repeated-failure context', async () => {

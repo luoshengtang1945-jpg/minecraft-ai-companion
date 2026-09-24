@@ -160,7 +160,7 @@ test('chat integration supplies shared context and leaves a matching FOLLOW path
     config: { url: 'http://localhost/test', model: 'test', timeoutMs: 1000, responseRetries: 0 } })
   agent.start()
   t.after(() => agent.stop())
-  bot.emit('chat', 'Steve', '你现在在干嘛？')
+  bot.emit('chat', 'Steve', '一起玩真好')
   await new Promise(resolve => setImmediate(resolve))
   assert.match(request.messages.at(-1).content, /SHORT_TERM_SYMBOLIC_OBSERVATIONS/)
   assert.deepEqual(spoken, ['在跟着你呢。'])

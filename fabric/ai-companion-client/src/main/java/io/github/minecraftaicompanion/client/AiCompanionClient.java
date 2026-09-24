@@ -4,6 +4,7 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.network.AbstractClientPlayerEntity;
 import net.minecraft.entity.player.SkinTextures;
+import net.minecraft.client.gl.Framebuffer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,6 +31,10 @@ public final class AiCompanionClient implements ClientModInitializer {
         if (visionBridge != null) {
             visionBridge.onFrameRendered(client);
         }
+    }
+
+    public static Framebuffer getVisionFramebufferOverride() {
+        return visionBridge == null ? null : visionBridge.getFramebufferOverride();
     }
 
     public static SkinTextures getSkinOverride(AbstractClientPlayerEntity player) {

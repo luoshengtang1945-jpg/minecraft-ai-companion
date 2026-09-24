@@ -2,9 +2,11 @@ const { OllamaClient } = require('./ollama-client')
 const { chatSafe } = require('./decision')
 const { recognizeImmediateMovement } = require('./immediate-movement')
 const { PLAYER_MESSAGE_TYPES, classifyPlayerMessage } = require('./goal-router')
-const { requiresVisualContext, conversationVisualContext } = require('../vision')
+const { requiresVisualContext, isVisualFollowUp, conversationVisualContext } = require('../vision')
 const { recognizeRestRequest } = require('../companion/rest-controller')
-const { groundActionReply } = require('./action-claims')
+const { groundActionReply, groundMovementReply } = require('./action-claims')
+const { answerFactualQuestion } = require('./factual-answer')
+const { checkWorldClaim } = require('./world-claims')
 
 function isRedundantMovementDecision(action, username, behavior) {
   return behavior?.source === 'PLAYER' && behavior.locomotionOwner === 'PLAYER' &&
@@ -12,52 +14,73 @@ function isRedundantMovementDecision(action, username, behavior) {
     (action === 'STOP' || behavior.username === username)
 }
 
+function isPlayerChatTranslation(translate) {
+  // Mineflayer's legacy chat pattern also matches command feedback like
+  // "[HHLYZ: Set the time to 1000]" and emits it as a `chat` event.
+  return translate !== 'chat.type.admin'
+}
+
 function createAgent({ bot, movement, survival, autonomy = null, learning = null, vision = null, visualWorldModel = null, scheduler = null, session = null, rest = null, logger, config }) {
   const client = new OllamaClient(config, scheduler, logger)
   let started = false
   let queue = Promise.resolve()
+  const recentVisualQuestion = new Map()
   const speak = message => {
     bot.chat(message)
     session?.recordSpeech(message)
   }
   const applyPlayerMovement = (action, username) => {
+    if (learning?.isAutonomousTaskActive?.()) learning.cancel('PLAYER_MOVEMENT_COMMAND')
     rest?.cancel()
     survival.cancelPursuit?.()
-    if (action === 'FOLLOW') movement.follow(username)
-    if (action === 'COME') movement.come(username)
-    if (action === 'STOP') movement.stop()
+    if (action === 'FOLLOW') return movement.follow(username)
+    if (action === 'COME') return movement.come(username)
+    if (action === 'STOP') return movement.stop()
   }
 
   const handleChat = async (username, message, context) => {
     try {
       let visualContext = null
-      if (requiresVisualContext(message)) {
+      if (context.visualQuestion) {
         const result = await vision?.request?.({ priority: 'PLAYER', trigger: 'PLAYER_VISUAL_QUESTION', requireFresh: true })
-        visualContext = conversationVisualContext(visualWorldModel)
-        if (!visualContext || (result && !['UPDATED', 'SKIPPED'].includes(result.status))) {
+        visualContext = conversationVisualContext(visualWorldModel, bot)
+        if (result?.status !== 'UPDATED' || !visualContext || visualContext.frameId !== result.frameId) {
+          logger.info(`[VISION] visual question has no fresh observation (${result?.reason || result?.status || 'NO_VISION'})`)
           speak('我现在没有可用的新画面，不能确定你指的是哪个东西。')
+          return
+        }
+        logger.info(`[VISION] answering from ${visualContext.perspective} frame ${visualContext.frameId}`)
+        if (visualContext.sceneType === 'UNKNOWN' && !visualContext.salientObjects.length &&
+            !visualContext.structures.length && !visualContext.terrain.length) {
+          speak('这张画面我没看清，不想瞎猜。')
           return
         }
       }
       logger.info(`Asking ${config.model} for an action`)
       const taskSummary = learning?.getTaskSummary?.()
       const taskText = taskSummary
-        ? `正在执行学习任务：${taskSummary.goal}；已尝试 ${taskSummary.attempts} 次；最近动作 ${taskSummary.lastAction || '无'}；最近评估 ${taskSummary.lastEvaluation || '无'}。`
+        ? `最近学习任务：${taskSummary.goal}；实际状态 ${taskSummary.outcome}（只有RUNNING或PENDING表示仍在进行）；已尝试 ${taskSummary.attempts} 次；最近动作 ${taskSummary.lastAction || '无'}；最近评估 ${taskSummary.lastEvaluation || '无'}。`
         : null
       const visualText = visualContext
-        ? `视觉上下文（${visualContext.source}，视角=${visualContext.perspective}，约${visualContext.ageMs}毫秒前）：${JSON.stringify(visualContext)}。只可据此谨慎回答，不得声称精确坐标；如视角是 HUMAN_CLIENT_CAMERA，要说明这是共享的玩家客户端画面。`
+        ? `这是本次刚看到的画面（${visualContext.perspective}，${visualContext.ageMs}毫秒前）：${JSON.stringify(visualContext)}。视觉标签和置信度都来自模型猜测，并非游戏核实。直接用一两句口语回答；画面里醒目的物体要说出来，若只能看清外观就说颜色和形状，不猜具体材质。小型生物、远处物体或身份不确定时说没看清。别复述旧画面、别念物体清单或声称精确坐标。`
         : null
-      const sessionText = session ? `短期陪伴上下文：${JSON.stringify(session.snapshot())}` : null
+      const sessionText = !context.visualQuestion && session ? `短期陪伴上下文：${JSON.stringify(session.snapshot())}` : null
       const commandText = context.immediateAction ? `本条即时指令已交给身体控制层：${context.immediateAction}；执行者是AI，发话玩家是${username}。FOLLOW是AI跟随玩家，COME是AI走到玩家身边，STOP是AI停下。回复不代表动作已经完成。` : null
       const contextText = [commandText, sessionText, taskText, visualText].filter(Boolean).join('\n') || null
-      const decision = await client.decide(username, message, contextText)
+      const decision = await client.decide(username, message, contextText, { freshVisual: context.visualQuestion })
+      if (!started) return
       logger.info(`Agent chose ${decision.action}`)
 
       const movementAction = ['FOLLOW', 'COME', 'STOP'].includes(decision.action)
       const staleMovement = movementAction && movement.getPlayerCommandEpoch() !== context.commandEpoch
       const redundantMovement = isRedundantMovementDecision(decision.action, username, movement.getBehaviorSummary?.())
+      if (staleMovement || (context.immediateAction && movement.getPlayerCommandEpoch() !== context.commandEpoch)) {
+        logger.info('[CHAT] Discarded superseded command acknowledgement')
+        return
+      }
+      let movementResult = context.immediateResult
       if (movementAction && !context.immediateAction && !staleMovement && !redundantMovement) {
-        applyPlayerMovement(decision.action, username)
+        movementResult = applyPlayerMovement(decision.action, username)
       }
       if (redundantMovement && !context.immediateAction) logger.info(`Keeping existing player behavior ${decision.action}; no path reset`)
       if (staleMovement) logger.info(`Discarded stale player movement decision ${decision.action}`)
@@ -67,6 +90,10 @@ function createAgent({ bot, movement, survival, autonomy = null, learning = null
       if (allowCombatDecision && decision.action === 'AGGRESSIVE') survival.setCombatMode('AGGRESSIVE')
 
       let responseText = decision.reply
+      if (movementResult === false) responseText = '刚才的移动请求没有被执行，不能算完成。'
+      else if (context.immediateAction || movementAction) {
+        responseText = groundMovementReply(responseText, { action: context.immediateAction || decision.action, bot, movement })
+      }
       if (!allowCombatDecision && ['ATTACK', 'PASSIVE', 'DEFENSIVE', 'AGGRESSIVE'].includes(decision.action)) {
         responseText = '好，我按你最新的移动指令来。'
       }
@@ -74,9 +101,14 @@ function createAgent({ bot, movement, survival, autonomy = null, learning = null
         const result = survival.requestAttack(username)
         if (result.reason === 'PASSIVE') responseText = '我现在是被动模式，不会主动攻击。'
         if (result.reason === 'NO_TARGET') responseText = '我没看到可以攻击的目标。'
+        if (result.accepted && /(?:打死|杀死|消灭|清理完|清掉).{0,5}(?:了|完成)/.test(responseText)) {
+          responseText = '攻击指令已接受，还没确认打赢。'
+        }
       }
 
-      const reply = chatSafe(groundActionReply(responseText, bot))
+      const worldClaim = checkWorldClaim(responseText, bot)
+      if (!worldClaim.valid) logger.info(`[FACT] Replaced unsupported ${worldClaim.topic} claim using current state`)
+      const reply = chatSafe(groundActionReply(worldClaim.valid ? responseText : worldClaim.correction, bot))
       if (reply) speak(reply)
     } catch (error) {
       logger.error('AI decision failed', error)
@@ -84,13 +116,24 @@ function createAgent({ bot, movement, survival, autonomy = null, learning = null
     }
   }
 
-  const onChat = (username, message) => {
+  const onChat = (username, message, translate, originalMsg) => {
+    if (!isPlayerChatTranslation(translate || originalMsg?.translate)) return
     if (username === bot.username) return
+    const visualQuestion = requiresVisualContext(message) ||
+      (isVisualFollowUp(message) && Date.now() - (recentVisualQuestion.get(username) || 0) < 90_000)
+    if (visualQuestion) recentVisualQuestion.set(username, Date.now())
+    else recentVisualQuestion.delete(username)
     session?.recordPlayer(username, message)
 
     logger.info(`[MC] ${username}: ${message}`)
     survival.observePlayer(username)
     autonomy?.observePlayer(username, message)
+    const factual = answerFactualQuestion(message, { bot, movement })
+    if (factual) {
+      logger.info(`[FACT] ${factual.topic}: ${factual.source}`)
+      speak(factual.reply)
+      return
+    }
     const restAction = recognizeRestRequest(message)
     if (restAction && rest) {
       void rest.request(restAction).catch(error => { logger.error('[REST] Request failed', error); speak('这次没能完成床的操作。') })
@@ -114,10 +157,17 @@ function createAgent({ bot, movement, survival, autonomy = null, learning = null
     }
 
     const immediateAction = route.immediateAction || recognizeImmediateMovement(message)
-    if (immediateAction) applyPlayerMovement(immediateAction, username)
+    const immediateResult = immediateAction ? applyPlayerMovement(immediateAction, username) : undefined
+    if (immediateAction && immediateResult === false) {
+      const unseen = ['FOLLOW', 'COME'].includes(immediateAction) && !movement.getPlayer?.(username)
+      speak(unseen ? '我暂时没看到你，靠近点再叫我。' : '这次没能动起来，我先待着。')
+      return
+    }
 
     const context = {
+      visualQuestion,
       immediateAction,
+      immediateResult,
       commandEpoch: movement.getPlayerCommandEpoch()
     }
     queue = queue.then(() => handleChat(username, message, context))
@@ -133,10 +183,11 @@ function createAgent({ bot, movement, survival, autonomy = null, learning = null
     stop() {
       if (!started) return
       started = false
+      recentVisualQuestion.clear()
       rest?.stop()
       bot.removeListener('chat', onChat)
     }
   }
 }
 
-module.exports = { createAgent, isRedundantMovementDecision }
+module.exports = { createAgent, isRedundantMovementDecision, isPlayerChatTranslation }

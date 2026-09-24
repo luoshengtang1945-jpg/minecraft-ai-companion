@@ -11,9 +11,10 @@ const CONVERSATION_SCHEMA = Object.freeze({
 const AUTONOMY_SCHEMA = Object.freeze({
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['IDLE', 'FOLLOW_PLAYER', 'WANDER_NEAR_PLAYER', 'LOOK_AT_PLAYER', 'COME_TO_PLAYER', 'EXPLORE_NEARBY', 'SAY', 'WAIT'] },
+    action: { type: 'string', enum: ['IDLE', 'FOLLOW_PLAYER', 'WANDER_NEAR_PLAYER', 'LOOK_AT_PLAYER', 'COME_TO_PLAYER', 'EXPLORE_NEARBY', 'SAY', 'WAIT', 'TRY_OBTAIN_ITEM'] },
     message: { type: 'string' },
     reason: { type: 'string' },
+    goalItem: { type: 'string', pattern: '^[a-z0-9_]{1,64}$' },
     durationMs: { type: 'number', minimum: 1000, maximum: 30000 }
   },
   required: ['action'],

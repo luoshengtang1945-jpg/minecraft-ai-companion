@@ -85,7 +85,7 @@ class VisionFrameServer {
           camera
         })
         if (!result.accepted) return this.#reply(response, 202, { accepted: false, reason: result.reason })
-        this.logger?.throttled?.('vision-frame-received', 5000, 'info', '[VISION] frame received')
+        this.logger?.throttled?.('vision-frame-received', 30000, 'info', '[VISION] frame received')
         this.onFrame?.(result.frame)
         this.#reply(response, 202, { accepted: true, frameId: result.frame.id })
       } catch (error) {

@@ -5,9 +5,9 @@ behavior, release checks, remaining limitations, and the next development priori
 
 A local-first autonomous companion for Minecraft Java Edition, built with Mineflayer, mineflayer-pathfinder, Ollama, and `qwen3-vl:8b`. It can converse and follow player commands, but it also observes a compact game state and occasionally chooses its own safe nearby action when the player says nothing.
 
-The project requires no paid API. Stage 4.2 adds an opt-in local multimodal perception foundation; it does **not** implement voice, long-term visual memory, a true companion render camera, or general Minecraft play.
+The project requires no paid API. Stage 4.2 adds opt-in local multimodal perception, including a companion-position render camera through the Fabric client. It does **not** implement voice, long-term visual memory, or general Minecraft play.
 
-The manually validated Stage 3 stack remains the stable foundation. The current feature branch adds the minimal Learning Agent loop for one objective: obtain at least one `oak_log` through validated primitives, observation, evaluation, reflection, and local memory. Learning is disabled by default.
+The manually validated Stage 3 stack remains the stable foundation. The current feature branch adds a minimal Learning Agent loop: a fixed, opt-in `oak_log` experiment plus optional model-proposed nearby item experiments. Both use validated primitives, observation, evaluation, reflection, and local memory. Automatic learning is disabled by default.
 
 ## Current capabilities
 
@@ -22,7 +22,7 @@ The manually validated Stage 3 stack remains the stable foundation. The current 
 - Compact state summaries containing position, player distance/activity, health, food, time, weather, combat mode, behavior, entities, resources, inventory, recent events, and current goal
 - Autonomous `IDLE`, `FOLLOW_PLAYER`, `WANDER_NEAR_PLAYER`, `LOOK_AT_PLAYER`, `COME_TO_PLAYER`, `EXPLORE_NEARBY`, `SAY`, and `WAIT`
 - Non-LLM spawn presence after a short randomized delay, plus bounded nearby movement with basic endpoint hazard checks
-- Proactive speech with global cooldown and semantic-key deduplication
+- Proactive speech with cooldown, short-term topic deduplication, and guards against invented shared tasks, unverified attackers, and unstarted movement claims
 - Source-aware goals with survival/player/autonomous priority and interruption lifecycle
 - An editable persistent personality configuration
 - Optional local-only custom skin rendering for the remote `AI_Companion` profile through a purpose-built Fabric client mod
@@ -66,19 +66,29 @@ The layers are deliberately separate:
 - `config/companion-personality.json` contains personality and behavioral preferences separately from prompts.
 - `fabric/ai-companion-client/` maps a configured remote profile to a local skin PNG and can optionally capture/downscale the native game framebuffer for the loopback visual bridge.
 
-Ollama requests are asynchronous and centrally scheduled as `PLAYER_VISUAL_PERCEPTION > PLAYER_CONVERSATION > PLAYER_TASK_DECISION > TASK_VISUAL_PERCEPTION > LEARNING_REFLECTION > BACKGROUND_VISUAL_PERCEPTION > AUTONOMY`. Vision owns no locomotion tier: Mineflayer events, pathfinding, combat, and the survival timer never wait for Qwen.
+Ollama requests are asynchronous and centrally scheduled as `PLAYER_VISUAL_PERCEPTION > PLAYER_CONVERSATION > PLAYER_TASK_DECISION > TASK_VISUAL_PERCEPTION > AUTONOMOUS_TASK_DECISION > LEARNING_REFLECTION > BACKGROUND_VISUAL_PERCEPTION > AUTONOMY`. Vision owns no locomotion tier: Mineflayer events, pathfinding, combat, and the survival timer never wait for Qwen.
 
 ## Stage 4.2 local visual perception
 
 Set `VISION_ENABLED=true` in `.env` and `visionEnabled=true` in the Fabric client config to opt in. Fabric captures the completed Minecraft framebuffer at a low rate, downsamples it (960×540 default), computes a 16×9 grayscale change signature, and POSTs a bounded PNG to `http://127.0.0.1:32145/v1/frames`. Both sides accept loopback only; an optional shared token can be set on both sides. Node keeps only the newest non-stale frame, rejects malformed/oversize input, and drops redundant background work.
 
-The current source is explicitly `HUMAN_CLIENT_CAMERA`. It is useful shared visual context, but it is not AI_Companion's own viewpoint. The source label is retained through the world model and conversation prompt. Visual claims remain approximate region/confidence hypotheses; only Mineflayer symbolic observations may supply exact positions, health, inventory, entities, or objective success.
+The Fabric config `visionPerspective` selects `HUMAN_CLIENT_CAMERA` (the default shared view) or `COMPANION_CAMERA` (a separate first-person render from the loaded remote AI_Companion entity). The companion mode is opt-in, samples at `visionCompanionCaptureIntervalMs=5000` by default, and requires the bot to be loaded by the human client's world. It does not change the human's displayed camera or need another account. The source label is retained through the world model and conversation prompt. Visual claims remain approximate region/confidence hypotheses; only Mineflayer symbolic observations may supply exact positions, health, inventory, entities, or objective success. The companion render has been live-tested on this Fabric 1.21.11 installation, but other GPUs and clients remain unverified.
+
+Questions such as `你面前是什么` and `你描述一下你的视角`, plus immediate follow-ups like `现在呢` or `再看一次`, request a fresh visual inference. Each visual reply uses that request's frame ID and current observation only; older chat descriptions are not reused as scene evidence. If no fresh frame is available, the companion says so. `[VISION] answering from COMPANION_CAMERA frame ...` identifies the exact frame used for a reply.
+
+In `COMPANION_CAMERA` mode, moving the human player does not move the companion's camera. If the companion is stopped, a fresh answer may still describe the same scenery because its position and facing direction have not changed. For a visual retest, move or turn the companion, then ask again; `VISION_DEBUG_SAVE_FRAMES=true` can save the exact local frame for inspection in the git-ignored `vision-debug/` directory. Those screenshots can contain private world details and should not be published.
+
+Each image is now analyzed independently: the previous image summary is not sent back to Qwen with a new PNG. Visual conversation uses the current frame's higher-confidence object/terrain observations and omits the model's free-form scene summary, which previously repeated across visually different frames. The visual-question matcher includes `你现在看到的是什么` as well as immediate follow-ups. A moved bot may still need the next five-second capture before its view changes.
+
+A live superflat-world check used separate player and companion viewpoints: the saved `COMPANION_CAMERA` PNG showed a block on the companion's right while the human view showed a different arrangement. In dark rain Qwen sometimes mislabeled the Overworld as the Nether. The verified game dimension rejects that scene label, but the guard now keeps independently visible, high-confidence color/shape descriptions (for example, a blue cube) without promoting a guessed block material. The reply should mention a prominent visible shape while admitting uncertainty about its material. This does not make visual object recognition authoritative; the camera can turn or move before the next requested frame.
 
 Background perception checks at a 45-second interval and after substantial grayscale changes, with `VISION_BACKGROUND_COOLDOWN_MS=30000` measured from completion. Incoming frames replace one pending slot while inference runs. A newer frame ID alone does not invalidate a useful result; age, dimension, UI, or a newer accepted observation can. Background work does not queue behind busy model work, and cooldown also follows preemption/discard/failure. Task/player refreshes bypass background cooldown. Visual observations expire 30 seconds after capture. Optional bounded debug frames go under ignored `vision-debug/`.
 
-Fabric labels frames `GAMEPLAY`, `MENU`, `CHAT`, `INVENTORY`, or `OTHER_SCREEN` using the client Screen type. World perception processes only `GAMEPLAY`. Frames without UI metadata are conservatively treated as `OTHER_SCREEN`, so rebuild and install the updated Fabric jar. `[VISION] metrics` summarizes received/replaced frames, inference starts, accepted/stale observations, and preemption at most once per 30 seconds.
+Fabric labels frames `GAMEPLAY`, `MENU`, `CHAT`, `INVENTORY`, or `OTHER_SCREEN` using the client Screen type. World perception processes only `GAMEPLAY`. Frames without UI metadata are conservatively treated as `OTHER_SCREEN`, so rebuild and install the updated Fabric jar. `[VISION] metrics` summarizes received/replaced frames, inference starts, accepted/stale observations, and preemption at most once per 60 seconds.
 
 Learning `EXPLORE` now specifies a total intention extent of 2–32 blocks, still constrained by the episode radius. Qwen chooses the heading, extent, and optional `watchFor` symbolic names. One path persists while observations update every 750 ms; no LLM decision is requested at each short segment. Arrival, timeout, route failure, player interruption, new watched/objective-item evidence, or changed visual scene context returns control to cognition. Survival suspends/resumes the path. `MOVE_NEAR` uses the same monitoring. A pending or active learning task blocks Presence, including the memory-loading and inference intervals.
+
+For `MOVE_NEAR`, `distance` is a bounded stopping radius (1–6), not the observed distance to the target. If Qwen copies an out-of-range observed distance into this field, the invalid decision is rejected before any game action; a bounded corrective request includes the rejected JSON and the violated constraint. The model must return another schema-valid action. This was exercised with a generic `birch_log` fake-world target eight blocks away across ten consecutive two-episode simulations (20/20 simulated successes); that simulation is not a Minecraft live-play guarantee.
 
 The reproducible scheduler simulation is `node benchmark/vision/scheduler.js`. See [the regression report](docs/STAGE-4.2-REGRESSION.md) for measurements and the exact live retest.
 
@@ -95,7 +105,9 @@ Goal priority is `SURVIVAL (100) > PLAYER (50) > PLAYER_TASK (30) > AUTONOMOUS (
 - Normal player conversation does not cancel or mutate an active task; explicit phrases such as “别弄了” do.
 - Autonomous actions are rejected while a higher-priority goal owns the body.
 - An in-progress autonomous movement intention is not replaced by periodic autonomy ticks.
-- Autonomous movement goals complete on `goal_reached`; timed waits complete through bounded timers.
+- Autonomous movement goals complete on `goal_reached`; `noPath`, prolonged lack of progress, and a bounded movement timeout end them as failures instead of holding locomotion indefinitely. Timed waits complete through bounded timers. The next autonomy decision receives recent goal outcomes (including confirmed reach/failure reason), not just the fact that an action was requested. A goal-finished event arriving during inference is coalesced for a later decision rather than lost.
+- When free of player/survival goals, the autonomy state counts consecutive idle decisions so Qwen can choose a bounded initiative rather than interpreting a stationary player as an order to stand still. After a completed casual move, a cooldown removes casual movement from the allowed model action schema until it expires; player commands and survival remain unaffected. This is still small-scale nearby companionship, **not** general autonomous resource gathering, crafting, or building.
+- A model-started FOLLOW is one continuous, bounded companionship interval, then releases locomotion for reassessment; a cooldown prevents immediately choosing the same indefinite-feeling follow loop. Explicit player FOLLOW remains persistent and resumes after survival exactly as before.
 
 The action registry is intentionally extensible so future stages can register `GATHER`, `MINE`, `CRAFT`, `BUILD`, `EAT`, `EQUIP`, `SLEEP`, `EXPLORE`, `FIGHT`, and `RETURN_HOME` without replacing the scheduler or goal system.
 
@@ -115,6 +127,13 @@ The snapshot includes the last six conversation/proactive speech entries (up to
 It is in-memory context, not persistent learning or world memory. Conversation
 requests attach only the latest snapshot rather than saving old observations in
 chat history. Autonomy uses the same context and existing inference schedule.
+Conversation and autonomy now read the same editable personality configuration.
+Player chat can still receive a model-generated draft that invents scenery,
+shared work, or a past shared achievement. A narrow text-only revision and
+deterministic checks withhold common unsupported claims; when the revision also
+fails, a short honest fallback is used. This is not a general hallucination
+solution or long-term episodic memory. A question about something “we built”
+does not by itself prove the companion witnessed or remembers it.
 If a conversation decision merely repeats the currently active PLAYER movement
 for the same player, the agent retains the existing path instead of resetting it.
 Immediate commands and survival-owned movement still use the normal command path.
@@ -128,6 +147,21 @@ The latter disables only the automatic spawn experiment; explicit player learnin
 requests remain available and suspend autonomy while pending/active. Disabled
 autonomy now logs that proactive conversation is disabled. Silence decisions log
 their model reason; blocked speech logs conversation-gap/cooldown/topic/text reasons.
+
+An additional, separate experiment is available with `AUTONOMOUS_LEARNING_ENABLED=true`
+(default `false`). After at least two uncommanded free intervals (silence or speech), Qwen may propose
+`TRY_OBTAIN_ITEM` for an item whose name is both in a nearby useful-block observation
+and the Minecraft item registry, provided the player is close, the companion has at
+least 12 health, no nearby hostiles are observed, no other goal owns locomotion, and
+there has been no recent hurt event, and the episode cap has not been reached. The
+system does not select an item or encode
+how to obtain it: Qwen makes the proposal, then the existing bounded Stage 4 primitive
+episode tries it. The model may choose another action or fail to obtain the item.
+While an episode is pending or active, normal autonomy/presence is suppressed;
+survival preempts it, and a player's FOLLOW/COME/STOP cancels an autonomous episode.
+This opt-in feature can change blocks and inventory in the world; test only in a
+disposable area. It is not the same as `LEARNING_ENABLED`, which starts the earlier
+fixed oak-log experiment on spawn.
 
 While PLAYER/PLAYER_TASK/SURVIVAL owns locomotion, autonomy's model action schema
 is narrowed to SAY/IDLE and independently validated. The existing survival and
@@ -147,11 +181,12 @@ check for common reversed-direction phrases. This is a narrow language guard, no
 a general guarantee that every model sentence is correct.
 
 Run `node scripts/smoke-companion-dialogue.js` for an actual configured-model check:
-three “跟着我” exchanges, an ordinary preference question, and two synthetic new-rain
-events during FOLLOW. It never connects to Minecraft. It checks basic role direction,
-nonempty/nonidentical replies and SAY decisions, not general factual correctness or
-human-like quality. Model output remains variable, and regex direction checks are
-not a full semantic validator.
+three “跟着我” exchanges, a preference question, four independent open-chat
+scenarios (boredom, own preference, building ability, unsupported shared memory),
+and two synthetic new-rain events during FOLLOW. It never connects to Minecraft.
+It checks basic role direction, nonempty/nonidentical replies, common unsupported
+claims, and SAY decisions, not general factual correctness or human-like quality.
+Model output remains variable, and text guards are not a full semantic validator.
 
 Live retest: restart the bot, verify `Autonomy enabled` and no automatic learning
 experiment on spawn. Issue FOLLOW, exchange a few messages, then stay silent for
@@ -218,15 +253,48 @@ npm start
 
 ## Configuration
 
+### Grounded factual replies
+
+Closed Chinese questions such as `天气怎么样`, `现在是白天还是晚上`, `你在睡觉吗`,
+and `你在干嘛` now read live Mineflayer state directly, without model inference or
+movement commands. Missing state stays unknown; precipitation is not assumed to be
+sunshine or local rain rather than snow. Day/night answers are limited to known
+overworld time. Preferences, hypotheses and compound requests still use normal chat.
+These factual replies favor correctness over varied wording.
+
+Conversation checks movement acceptance, suppresses acknowledgements superseded by
+new commands, and distinguishes approaching/following intent from confirmed nearby
+position. Survival-deferred commands are not announced as already stopped. Task
+context now includes actual outcome rather than labeling every past episode active.
+Explicit present-tense weather/day claims get a narrow symbolic check: incorrect
+conversation claims are corrected and incorrect autonomous claims withheld without
+consuming speech cooldown. This is intentionally not a general hallucination filter;
+unrecognized wording, invented terrain, gameplay advice and other claims still need
+further validation. No new movement, combat, sleeping or learning skills are added.
+
+Manual retest: ask weather/day questions before and after known world changes; ask
+sleep status while in bed and after waking. While following, ask `你在干嘛` and verify
+the path continues. Ask `你喜欢下雨吗` to verify ordinary conversation still works.
+Issue FOLLOW then immediately STOP while inference is pending; an obsolete follow
+acknowledgement must not appear later. Test COME from a distance and make sure it
+does not prematurely claim arrival. Repeat the previously verified sleep/wake/
+resume cases. These changes await live validation before another checkpoint.
+
 ### Arrival companionship and nearby-bed interaction
 
-`AUTO_ACCOMPANY_ENABLED=true` starts one default autonomous FOLLOW intention after
+`AUTO_ACCOMPANY_ENABLED=false` is now the default: the companion may use presence
+and bounded autonomous goals instead of locking into FOLLOW on every join. Explicit
+player FOLLOW remains persistent and takes priority. Set `AUTO_ACCOMPANY_ENABLED=true`
+to restore the earlier one-time autonomous FOLLOW intention after
 `AUTO_ACCOMPANY_DELAY_MS=3500`, choosing the nearest visible human within
 `AUTO_ACCOMPANY_RANGE=16`. It retries unavailable ownership/player visibility for
 at most 20 checks, without Ollama. Any player movement command invalidates this
 arrival intention, even STOP before the delay ends. It never recreates FOLLOW on
 autonomy ticks. Existing player/survival/learning ownership remains authoritative.
-Disable this option to keep arrival entirely stationary/presence-driven.
+With the default disabled, presence and autonomy can move nearby, but neither may
+override PLAYER or SURVIVAL movement. Autonomous speech also groups paraphrases
+of the same weather/time topic during the configured deduplication window, so a
+reworded night warning does not become a new topic.
 
 Explicit `睡觉`, `你躺床上`, or `上床睡觉` requests now use Mineflayer's bed API,
 not a model's completion claim. Only a known overworld dimension, sleep-permitted
@@ -264,8 +332,11 @@ truth verifier. Quiet companionship after 90 seconds is offered to the existing
 autonomy inference as a social opportunity, not a forced sentence. Stationary is
 not interpreted as proof of resting; hurt events alone do not identify an attacker.
 
-Manual validation: restart and give no command for 5–10 seconds, then walk away
-within the configured arrival range and confirm automatic following. STOP must
+Manual validation: with the default arrival setting, restart and give no command
+for 5–10 seconds; the bot should show light presence without entering persistent
+FOLLOW. Say `跟我来` and confirm smooth persistent following. Optionally enable
+`AUTO_ACCOMPANY_ENABLED=true` and restart to test the former automatic arrival
+follow. STOP must
 remain sticky for at least 60 seconds. Next bring the bot within 2 blocks of its
 own empty bed in a safe overworld area at night and say `睡觉`; check actual lying
 pose, then `起床`. Repeat with daytime, no bed, occupied bed, and a new FOLLOW during
@@ -316,6 +387,10 @@ Core autonomy defaults:
 | `AUTONOMY_ENABLED` | `true` | Enables the autonomy controller without affecting survival or chat |
 | `AUTONOMY_INTERVAL_MS` | `30000` | Periodic inference interval; minimum 5000 ms |
 | `AUTONOMY_EVENT_MIN_GAP_MS` | `10000` | Minimum gap between event-triggered inference starts |
+| `AUTONOMY_MOVE_TIMEOUT_MS` | `45000` | Maximum active time for a finite autonomous move; stalled movement stops sooner |
+| `AUTONOMY_MOVE_COOLDOWN_MS` | `90000` | Minimum pause after a completed autonomous wander/explore before another casual move; does not limit player or survival movement |
+| `AUTONOMY_FOLLOW_DURATION_MS` | `120000` | Active duration of a model-started FOLLOW interval; survival interruption pauses the timer |
+| `AUTONOMY_FOLLOW_COOLDOWN_MS` | `180000` | Pause after a model-started FOLLOW interval before Qwen can start another; player FOLLOW is unaffected |
 | `AUTONOMY_SPEECH_COOLDOWN_MS` | `60000` | Minimum gap between autonomous chat messages |
 | `AUTONOMY_SPEECH_DEDUP_MS` | `300000` | Prevents repeating the same contextual speech key |
 | `AUTONOMY_MAX_PLAYER_DISTANCE` | `16` | Distance at which nearby exploration falls back to coming closer |
@@ -378,13 +453,17 @@ Controlled learning configuration:
 | Variable | Default | Purpose |
 | --- | ---: | --- |
 | `LEARNING_ENABLED` | `false` | Opt in to the Stage 4.0 oak-log experiment after spawn |
+| `AUTONOMOUS_LEARNING_ENABLED` | `false` | Allow Qwen to propose one of the safely observed item objectives during free idle; the episode uses the same primitive learning loop |
+| `AUTONOMOUS_LEARNING_MAX_EPISODES` | `1` | Maximum autonomous task proposals accepted in one bot process; a proposal cancelled before starting still uses this conservative cap |
+| `AUTONOMOUS_LEARNING_MIN_HEALTH` | `12` | Minimum health required to propose an autonomous task |
 | `LEARNING_START_DELAY_MS` | `5000` | Delay before the controlled episode starts |
 | `LEARNING_MAX_ACTIONS` | `20` | Maximum validated primitives in one episode |
 | `LEARNING_MAX_DURATION_MS` | `180000` | Wall-clock episode budget |
 | `LEARNING_REPEAT_LIMIT` | `3` | Consecutive identical failed/no-progress actions allowed |
 | `LEARNING_OBSERVATION_RANGE` | `8` | Radius for bounded block/entity observations |
 | `LEARNING_EXPLORE_RADIUS` | `16` | Maximum horizontal radius from the episode start for generic exploration |
-| `LEARNING_MOVE_TIMEOUT_MS` | `20000` | Timeout for one primitive movement |
+| `LEARNING_MOVE_TIMEOUT_MS` | `20000` | Base timeout for one primitive movement; bounded `EXPLORE` scales up to 60 seconds with requested distance |
+| `LEARNING_OBSERVATION_SETTLE_MS` | `300` | Short asynchronous delay after a successful block dig or approach to an observed dropped item before checking inventory pickup; maximum 1500 ms |
 | `LEARNING_MEMORY_FILE` | `learning-memory/memory.json` | Local transparent memory file; the default directory is Git-ignored |
 
 Personality persists in `config/companion-personality.json` and can be edited without changing the LLM prompts or controller code.
@@ -474,6 +553,42 @@ npm run benchmark:vision -- --count=3 --case=open_grassland=C:\path\frame.png
 
 The smoke command sends the real learning prompt/state to the configured local model once. The reliability command repeats the same validated decision 20 times. The coherence command gives Qwen a resource-neutral synthetic state with repeated no-progress observations and verifies that it can select generic `EXPLORE`. None of these commands connects to Minecraft or executes a primitive action.
 
+For the optional autonomous-task decision, `node scripts/smoke-autonomy-outcomes.js --scenario=task --count=20`
+sends a synthetic idle state with two observed item candidates through the real
+configured Qwen model and checks every structured action. Add `--item=spruce_log`
+to test a different single observed candidate. To smoke-test
+the next generic learning decision without changing Minecraft, use
+`node scripts/smoke-learning-ollama.js --item=birch_log --count=3`.
+Adding `--after-move` supplies a synthetic no-progress movement attempt and
+grounded reflection to check whether Qwen chooses a different primitive.
+`--after-dig`, `--after-item-move`, and `--after-look-item` probe a synthetic
+dropped-item sequence. The learning observation includes a dropped stack's actual
+Mineflayer item name/count only when the entity metadata is available; otherwise
+it leaves the identity unknown. Each decision schema lists only currently observed
+target references, and `USE_ITEM` is unavailable when no held item is observed.
+Persistent exploration can also stop for re-planning when a newly observed dropped
+stack matches a model-watched symbolic name.
+These synthetic tests do not prove that any in-game block can actually be broken
+or that its item reaches the bot inventory.
+`node scripts/smoke-learning-chain.js --item=birch_log --count=3` additionally
+asks the configured Qwen model to reflect on a real `ALREADY_NEAR_TARGET` result,
+choose its next primitive, then react to a simulated dropped-item observation.
+It checks that Qwen does not repeat the exact no-progress move or target a
+disappeared block; it never executes the suggested actions.
+`node scripts/simulate-learning-episode.js --item=birch_log` goes further: it
+runs the actual learning controller, observation builder, primitive executor,
+movement arbitration, evaluator, JSON memory store, and configured Qwen model against a tiny fake
+world with one block and a dropped item. The fake world implements simplified
+server physics only for this test; a PASS is end-to-end software evidence,
+not a claim that Minecraft 1.21.11 has been validated. Use `--distance=6`
+to make the model approach before it can dig, or `--item=spruce_log` to change
+the symbolic objective without changing the simulated action rules. `--episodes=2`
+resets the fake world, retrieves the first episode's learned candidate, and
+checks that a second confirmed success increases its stored confidence.
+`--no-path --distance=8` instead forces route failures and checks that the
+episode stops at its budget, persists a failure, and creates no learned skill.
+These local-model scripts need Ollama but not a Minecraft LAN port or running game.
+
 Build and test the optional Fabric client module separately:
 
 ```powershell
@@ -481,7 +596,7 @@ cd fabric\ai-companion-client
 .\gradlew.bat build
 ```
 
-Tests cover locomotion ownership, stale inference epochs, message routing, fast task acknowledgement, player-task priority, central Ollama scheduling/preemption, structured response classification/retries, reflection carry-forward, repeated-action discouragement, bounded exploration and novelty tracking, conversation during learning, spawn presence, autonomy scheduling, goal lifecycle, survival/combat, primitive validation, evidence-only success, episode budgets, memory persistence, skill extraction/retrieval, and confidence updates.
+Tests cover locomotion ownership, stale inference epochs, message routing, fast task acknowledgement, player-task priority, central Ollama scheduling/preemption, structured response classification/retries, reflection carry-forward, repeated-action and failed-material discouragement, objective-relevant progress evaluation, bounded exploration and novelty tracking, conversation during learning, spawn presence, autonomy scheduling, goal lifecycle, survival/combat, primitive validation, evidence-only success, episode budgets, memory persistence, skill extraction/retrieval, and confidence updates.
 
 ## Exact manual Stage 4.0 experiment
 
@@ -492,15 +607,52 @@ Use a disposable, flat test area and keep a backup. The model is deliberately no
 3. Set `COMBAT_MODE=DEFENSIVE` and `AUTONOMY_ENABLED=true`. `LEARNING_ENABLED` may remain `false`; it controls only the automatic experiment, not player-created tasks.
 4. Run `npm start`, then say “帮我弄点木头” or “你试试怎么获得一个原木”. Confirm “行，我试试。” appears immediately, before planning completes, followed by a PLAYER_TASK learning episode.
 5. Watch `[LEARN] Attempt N: ACTION -> EVALUATION` logs. After no progress, confirm the next cycle links `[LEARN] Previous`, `[LEARN] Lesson`, and `[LEARN] Next`. When no useful target is visible, Qwen may choose bounded `EXPLORE heading=... distance=...`; JavaScript must not choose it on Qwen's behalf.
+   Repeated static no-progress observations temporarily remove `OBSERVE`. A completed dig of a material that produced no objective-relevant progress removes further digs of that material for the episode. If the objective item is already observed as a block or dropped stack, the dynamic action schema focuses movement/dig target references on that evidence, and removes unrelated digging; Qwen still chooses the primitive. Inventory-goal episodes do not offer `SAY` as a task action. A block `MOVE_NEAR` request may be physically tightened to a 3.5-block stopping radius, recorded as `requestedDistance` and `effectiveDistance`.
 6. Confirm `EXPLORE` stays within `LEARNING_EXPLORE_RADIUS` of the episode start, moves through existing learning/pathfinder ownership, and produces a new observation containing updated region and nearby-block history.
 7. Spawn or approach a hostile during exploration. Confirm SURVIVAL takes locomotion immediately. After danger clears, exploration resumes if its time budget remains; combat must not wait for Qwen.
 8. While a learning decision is pending, say “你在干嘛？”. Confirm the conversation is answered before the task's next model decision and that the episode remains active.
 9. Say “跟我来” or “停下”. Confirm PLAYER locomotion takes control immediately without marking the task cancelled. Then explicitly say “别弄了” and confirm the task ends as `PLAYER_CANCELLED`.
 10. Start a fresh uninterrupted task. Count inventory independently. SUCCESS is valid only after Mineflayer observes at least one `oak_log`; model text alone cannot complete the objective.
-11. Stop the bot and inspect `learning-memory/memory.json`. Confirm the episode contains its request/source, observations, attempts, evaluations, outcome, duration, and—only after evaluator-confirmed success—a skill copied from the actual action sequence.
+11. Stop the bot and inspect `learning-memory/memory.json`. Confirm the episode contains its request/source, observations, attempts, evaluations, outcome, duration, and—only after evaluator-confirmed success—a skill candidate derived from its objective-progressing actions. Failed detours remain in the episode but are not copied into the reusable candidate. The model sees learned targets by observed name/kind, not stale world coordinates or entity IDs.
 12. Restart under comparable conditions. Confirm relevant learned candidates are retrieved and inspect confidence/success/failure timestamps after reuse.
 
 To reset only learned Stage 4 state, stop the bot and remove the local `learning-memory/` directory. It is not tracked by Git.
+
+## Optional autonomous learning retest
+
+This is a separate opt-in test; keep `LEARNING_ENABLED=false` so the fixed spawn
+experiment does not run. Make a backup or use a disposable LAN world.
+
+1. In `.env`, set `AUTONOMY_ENABLED=true`, `AUTONOMOUS_LEARNING_ENABLED=true`, `AUTONOMOUS_LEARNING_MAX_EPISODES=1`, `COMBAT_MODE=DEFENSIVE`, and the current `MC_PORT`.
+2. Place the companion within roughly 4–8 blocks of the player in a safe daytime area. Leave an ordinary useful block such as a birch log within 4–8 blocks of the bot and remove its corresponding item from the bot inventory. Stand far enough from that block that the human player will not pick up its drop first. Keep hostiles and valuable structures away.
+3. Start Ollama and `npm start`. Give no player command. Wait for at least two free autonomy intervals. Qwen may choose `TRY_OBTAIN_ITEM`; this is optional, not a guaranteed timed trigger. If chosen, check that the log reports the selected item and a Stage 4 episode begins without a new scripted harvesting skill.
+4. Observe the bounded primitive attempts and their actual inventory evaluations. A spoken success claim is not enough: only a recorded inventory increase confirms success. The episode must end at its action/time budget if it cannot make progress.
+5. Repeat in another disposable run and say `跟我来` while an autonomous episode is pending or active. Confirm it cancels and PLAYER FOLLOW takes control immediately. Repeat with a nearby threat: SURVIVAL must preempt learning and remain responsive.
+6. Inspect the Git-ignored `learning-memory/memory.json` to see the episode, attempts, outcome, and any learned skill candidate. Restart with the flag set back to `false` for ordinary companionship.
+
+The optional **autonomous** task proposal in this section has unit and local-model
+coverage but has not been validated end to end in Minecraft. A Qwen proposal is
+not evidence that a full gathering skill exists.
+The short post-action settle delay only helps observe prompt item pickup; it cannot
+make dropped items enter the inventory or solve pathfinding to them.
+Qwen reflections are hypotheses: even with explicit grounding instructions it
+may speculate about an obstacle or map edge when the only confirmed signal is
+`NO_PATH`. The evaluator and skill creation still use observed outcome evidence,
+not those speculative explanations.
+
+In a disposable peaceful superflat LAN world on 2026-09-25, a fresh-memory
+player-requested episode did obtain `oak_log` in three evaluated primitives:
+`MOVE_NEAR` observed block, `DIG_BLOCK`, then `MOVE_NEAR` the dropped stack.
+Mineflayer confirmed the inventory increase before SUCCESS. The local memory file
+stored the full episode and an evidence-derived candidate. Several other live
+runs failed or needed a later retry: Qwen chose unrelated terrain/repeated
+observation, and one post-dig response was truncated in Ollama's separate
+`message.thinking` field despite HTTP 200. The general target-focus, bounded
+movement, corrective structured-output retry, and optional-reflection fallback
+address those cases, but they do not guarantee success in an arbitrary world.
+Qwen reflections may still speculate about terrain or unavailable tools; the
+evaluator and skill creation use observed outcomes, not those speculations.
+Keep learning away from valuable builds.
 
 ## Exact manual Stage 3 test procedure
 
@@ -529,17 +681,22 @@ Use a flat test area with `keepInventory` enabled if desired.
 
 LLM choices are intentionally non-deterministic. A particular inference may choose `IDLE` or `WAIT`; validate safety, cadence, priority, and boundedness across several decisions rather than expecting one exact action every interval.
 
+For the current autonomous-goal outcome retest, leave `AUTO_ACCOMPANY_ENABLED=false` and `LEARNING_ENABLED=false`. In a flat safe area, stand within 4–8 blocks and give no commands for at least three autonomy intervals (about 90 seconds at the default setting). Look for a bounded autonomous walk; its log should end in `COMPLETED: GOAL_REACHED` or a specific `FAILED: NO_PATH/STALLED/MOVE_TIMEOUT`, never indefinite ownership. A completed casual walk should not be repeated during the next `AUTONOMY_MOVE_COOLDOWN_MS` (default 90 seconds). While it is walking, issue `跟我来`: PLAYER should take locomotion immediately, and that explicit FOLLOW should remain active beyond the autonomous two-minute follow duration. A model-started FOLLOW, if selected, instead ends after `AUTONOMY_FOLLOW_DURATION_MS` of active locomotion; survival interruptions pause that clock. Say `停下` and wait beyond the cooldown to confirm no autonomous movement overrides the player's STOP. This is a manual validation target, not a claim of a live test of these latest changes.
+
+Without Minecraft, `node scripts/smoke-autonomy-outcomes.js --scenario=free` sends an idle-state decision to the configured local Qwen model; `--scenario=failed` supplies a recent `NO_PATH` outcome and `--scenario=completed` supplies a recent completed walk with movement cooldown. The smoke test validates structured responses only; it cannot prove in-game pathfinding or naturalness.
+
 ## Known limitations
 
-- Player activity is inferred from velocity, water state, and held item; there is no visual scene understanding yet.
+- Player activity is inferred from velocity, water state, and held item. Optional Fabric camera summaries are approximate and do not reliably identify detailed player activity.
 - “帮我打它” selects the nearest eligible non-creeper hostile rather than using crosshair ray tracing.
 - Damage events do not identify the attacker, so defensive attribution selects a nearby plausible hostile.
 - Safe autonomous movement validates the destination and relies on pathfinder for the route; it does not yet perform full route-level cliff, water, or hazard planning.
 - Useful-block summaries are bounded local scans, not semantic vision or world memory.
 - Stage 3 goals and recent events remain runtime-only. Stage 4 learning episodes/skill candidates persist as local JSON, but this is narrow experimental strategy memory rather than general long-term memory.
-- Autonomous actions do not gather, mine, craft, build, eat, equip, sleep, fight, or travel beyond the nearby player area.
+- Ordinary autonomous actions do not gather, mine, craft, build, eat, equip, sleep, fight, or travel beyond the nearby player area. The separate opt-in bounded learning episode can attempt primitive digging, but it is not a reliable gathering or building skill.
 - Ollama work is single-flight through a central priority queue. Conversation can still take the model's normal generation time, but it no longer waits behind a full autonomy or reflection response; lower-priority requests are aborted and retried/deferred.
-- The learning model sees Mineflayer's symbolic block/entity data, not pixels. It can attempt only the configured oak-log objective, has no crafting/general task planner, and may fail due to model choices, reachability, tool requirements, drops, or the action/time budget.
+- Learning decisions use Mineflayer's symbolic block/entity observations; optional `LOOK_VISUALLY` supplies a bounded semantic summary from the companion camera, not raw pixels or a reliable world map. The fixed spawn experiment targets `oak_log`; optional autonomous experiments may propose only currently observed allowlisted item names. There is no crafting/general task planner, and episodes may fail due to model choices, reachability, drops, or the action/time budget.
+- Proactive speech is not a continuous monologue. A rejected repeated/unsupported line defers routine speech choices for two minutes; fresh world events can still prompt a new comment. Visual labels can be wrong even when the frame really comes from the companion camera, so uncertain visual details are not treated as server facts.
 - The custom skin is client-side by design. Vanilla/unmodded observers still see the offline default skin, and every observing client must install the Fabric module locally.
 - The skin is cached for the Minecraft client session. Changing the PNG or identity configuration requires a Minecraft restart.
 

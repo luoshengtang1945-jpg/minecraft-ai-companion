@@ -6,6 +6,7 @@ const { EVALUATION, objectiveSatisfied, evaluateAttempt } = require('./evaluator
 const { actionShape } = require('./memory-store')
 const { EpisodeExplorationState } = require('./exploration-state')
 const { isOllamaPreempted, isStructuredResponseError } = require('../ollama')
+const { createItemGoal } = require('./item-goal')
 
 const OAK_LOG_EXPERIMENT = Object.freeze({
   id: 'obtain-oak-log',
@@ -39,6 +40,7 @@ class LearningController {
     this.now = now
     this.sleep = sleep || (duration => new Promise(resolve => setTimeout(resolve, duration)))
     this.started = false
+    this.closed = false
     this.timer = null
     this.episode = null
     this.generation = 0
@@ -46,10 +48,12 @@ class LearningController {
     this.runPromise = null
     this.memoryLoadPromise = null
     this.pendingPlayerTask = null
+    this.pendingAutonomousTask = null
   }
 
   async start() {
     if (this.started || !this.config.enabled) return false
+    this.closed = false
     this.started = true
     await this.#ensureMemoryLoaded()
     if (!this.started) return false
@@ -63,6 +67,7 @@ class LearningController {
 
   stop() {
     this.started = false
+    this.closed = true
     if (this.timer) clearTimeout(this.timer)
     this.timer = null
     return this.cancel('LEARNING_STOPPED')
@@ -72,6 +77,49 @@ class LearningController {
     return Boolean(this.episode && this.episode.outcome === EPISODE_OUTCOMES.RUNNING)
   }
 
+  isAutonomousTaskActive() {
+    return Boolean(this.pendingAutonomousTask ||
+      (this.isActive() && this.episode.goal.source === GOAL_SOURCES.AUTONOMOUS))
+  }
+
+  queueAutonomousTask(proposedGoal) {
+    if (this.closed || this.pendingAutonomousTask || this.pendingPlayerTask || this.runPromise || this.isActive() ||
+        [LOCOMOTION_OWNERS.PLAYER, LOCOMOTION_OWNERS.SURVIVAL].includes(this.movement.getLocomotionOwner())) return false
+    let goal
+    try {
+      goal = createItemGoal(proposedGoal?.objective?.item)
+    } catch {
+      return false
+    }
+    const pending = { goal, cancelled: false, at: this.now() }
+    this.pendingAutonomousTask = pending
+    this.movement.setLearningPending?.(true)
+    this.autonomy?.setSuppressed(true, 'learning_episode')
+    this.logger.info(`[LEARN] Queued autonomous task: ${goal.description}`)
+    void this.#launchAutonomousTask(pending).catch(error => this.logger.error('[LEARN] Autonomous task failed to start', error))
+    return true
+  }
+
+  async #launchAutonomousTask(pending) {
+    try {
+      await this.#ensureMemoryLoaded()
+      while (this.pendingAutonomousTask === pending &&
+        this.movement.getLocomotionOwner() === LOCOMOTION_OWNERS.SURVIVAL &&
+        this.now() - pending.at < 30000) await this.sleep(250)
+      if (this.pendingAutonomousTask !== pending || pending.cancelled ||
+          [LOCOMOTION_OWNERS.PLAYER, LOCOMOTION_OWNERS.SURVIVAL].includes(this.movement.getLocomotionOwner())) return
+      this.pendingAutonomousTask = null
+      this.movement.setLearningPending?.(false)
+      await this.runExperiment(pending.goal)
+    } finally {
+      if (this.pendingAutonomousTask === pending) this.pendingAutonomousTask = null
+      if (!this.isActive() && !this.pendingAutonomousTask && !this.pendingPlayerTask) {
+        this.movement.setLearningPending?.(false)
+        this.autonomy?.setSuppressed(false, 'learning_episode')
+      }
+    }
+  }
+
   async runExperiment(goal = OAK_LOG_EXPERIMENT) {
     if (this.runPromise || this.isActive()) return this.runPromise
     this.runPromise = this.#run(goal).finally(() => { this.runPromise = null })
@@ -79,6 +127,7 @@ class LearningController {
   }
 
   startPlayerTask({ username, message, goal = null }) {
+    if (this.pendingAutonomousTask) this.cancel('PREEMPTED_BY_PLAYER_TASK')
     if (this.timer) clearTimeout(this.timer)
     this.timer = null
     const playerGoal = goal || createOakLogGoal({
@@ -119,6 +168,10 @@ class LearningController {
   }
 
   getTaskSummary() {
+    if (this.pendingAutonomousTask) {
+      return { goal: this.pendingAutonomousTask.goal.description, source: GOAL_SOURCES.AUTONOMOUS,
+        attempts: 0, lastAction: null, lastEvaluation: null, outcome: 'PENDING' }
+    }
     if (this.pendingPlayerTask) {
       return {
         goal: this.pendingPlayerTask.goal.description,
@@ -144,6 +197,13 @@ class LearningController {
   cancel(reason = 'PLAYER_CANCELLED') {
     this.generation += 1
     let cancelled = false
+    if (this.pendingAutonomousTask) {
+      this.pendingAutonomousTask.cancelled = true
+      this.pendingAutonomousTask = null
+      this.movement.setLearningPending?.(false)
+      this.logger.info(`[LEARN] Pending autonomous task cancelled (${reason})`)
+      cancelled = true
+    }
     if (this.pendingPlayerTask) {
       this.pendingPlayerTask.cancelled = true
       this.pendingPlayerTask = null
@@ -169,7 +229,7 @@ class LearningController {
     const goalSource = goal.source || GOAL_SOURCES.AUTONOMOUS
     this.autonomy?.setSuppressed(true, 'learning_episode')
     if (!this.movement.beginLearningSession(goalSource)) {
-      this.autonomy?.setSuppressed(false, 'learning_episode')
+      this.#unsuppressIfNoPendingTask()
       this.logger.info('[LEARN] Experiment deferred because PLAYER or SURVIVAL owns locomotion')
       return null
     }
@@ -184,7 +244,7 @@ class LearningController {
     }) || { accepted: true, goal: null }
     if (!requested.accepted) {
       this.movement.endLearningSession()
-      this.autonomy?.setSuppressed(false, 'learning_episode')
+      this.#unsuppressIfNoPendingTask()
       return null
     }
 
@@ -286,6 +346,14 @@ class LearningController {
           await this.sleep(0)
           continue
         }
+        const movingToObservedDrop = action.action === 'MOVE_NEAR' &&
+          observationBefore.nearbyEntities?.some(entity => entity.ref === action.target && entity.droppedItem)
+        if (actionResult.success && (action.action === 'DIG_BLOCK' || movingToObservedDrop)) {
+          await this.sleep(this.config.observationSettleMs ?? 300)
+          if (!this.#isCurrent(token, episode)) return episode
+          actionExceededTimeBudget = actionExceededTimeBudget ||
+            this.now() - episode.startedAt >= this.config.maxDurationMs
+        }
         if (['EXPLORE', 'MOVE_NEAR'].includes(action.action)) {
           this.logger.info(`[LEARN] Intention ${action.action} ended: ${actionResult.reason}; returning evidence for replanning`)
         }
@@ -317,11 +385,15 @@ class LearningController {
           actionResult.reason !== 'PLAYER_PREEMPTED'
         ) {
           try {
-            const reflection = await this.client.reflect({ observationBefore, action, observationAfter, evaluation })
+            const reflection = await this.client.reflect({ observationBefore, action, actionResult,
+              observationAfter, evaluation })
             if (!this.#isCurrent(token, episode)) return episode
             attempt.reflection = reflection
           } catch (error) {
-            if (!isOllamaPreempted(error)) throw error
+            if (!isOllamaPreempted(error) && !(isStructuredResponseError(error) && error.status === 'ABORTED')) {
+              if (!isStructuredResponseError(error)) throw error
+              this.logger.info(`[LEARN] Reflection unavailable (${error.status}); keeping the observed action result`)
+            }
           }
         }
         this.logger.info(`[LEARN] Attempt ${episode.attempts.length}: ${action.action} -> ${evaluation.status}`)
@@ -391,7 +463,13 @@ class LearningController {
 
   #releaseEpisodeControl() {
     this.movement.endLearningSession()
-    this.autonomy?.setSuppressed(false, 'learning_episode')
+    this.#unsuppressIfNoPendingTask()
+  }
+
+  #unsuppressIfNoPendingTask() {
+    if (!this.pendingAutonomousTask && !this.pendingPlayerTask) {
+      this.autonomy?.setSuppressed(false, 'learning_episode')
+    }
   }
 
   #ensureMemoryLoaded() {

@@ -4,10 +4,15 @@ const { GOAL_SOURCES, GOAL_STATES } = require('../goals')
 const { LocomotionArbiter, LOCOMOTION_OWNERS } = require('./locomotion-arbiter')
 
 class MovementController {
-  constructor(bot, { logger, goalManager = null }) {
+  constructor(bot, { logger, goalManager = null, autonomousMoveTimeoutMs = 45000,
+    setIntervalFn = setInterval, clearIntervalFn = clearInterval }) {
     this.bot = bot
     this.logger = logger
     this.goalManager = goalManager
+    this.autonomousMoveTimeoutMs = autonomousMoveTimeoutMs
+    this.setIntervalFn = setIntervalFn
+    this.clearIntervalFn = clearIntervalFn
+    this.autonomousWatchdog = null
     this.arbiter = new LocomotionArbiter({ logger })
     this.movements = null
     this.behavior = { type: 'STOP', source: null, goalId: null }
@@ -24,16 +29,18 @@ class MovementController {
     this.bot.pathfinder.setMovements(movements)
   }
 
+  shutdown() {
+    this.#clearAutonomousWatchdog()
+  }
+
   getPlayer(username) {
     return this.bot.players[username]?.entity
   }
 
-  follow(username, { source = GOAL_SOURCES.PLAYER, expectedAutonomyEpoch = null } = {}) {
+  follow(username, { source = GOAL_SOURCES.PLAYER, expectedAutonomyEpoch = null,
+    maxDurationMs = null } = {}) {
     const player = this.getPlayer(username)
-    if (!player) {
-      if (source === GOAL_SOURCES.PLAYER) this.bot.chat('我没看到你，你跑哪去了？')
-      return false
-    }
+    if (!player) return false
 
     if (source === GOAL_SOURCES.AUTONOMOUS) {
       if (!this.#canStartAutonomous(expectedAutonomyEpoch)) return false
@@ -44,6 +51,7 @@ class MovementController {
       }
       this.behavior = { type: 'FOLLOW', username, source, goalId: requested.goal?.id ?? null }
       this.#applyBehavior()
+      if (Number.isFinite(maxDurationMs) && maxDurationMs > 0) this.#watchAutonomousFollow(maxDurationMs)
       this.logger.info(`Following ${username} autonomously`)
       return true
     }
@@ -61,10 +69,7 @@ class MovementController {
 
   come(username, { source = GOAL_SOURCES.PLAYER, expectedAutonomyEpoch = null } = {}) {
     const player = this.getPlayer(username)
-    if (!player) {
-      if (source === GOAL_SOURCES.PLAYER) this.bot.chat('我现在看不到你。')
-      return false
-    }
+    if (!player) return false
 
     if (source === GOAL_SOURCES.AUTONOMOUS) {
       return this.startAutonomousMovement({
@@ -149,6 +154,7 @@ class MovementController {
       goalId: requested.goal?.id ?? null
     }
     this.#applyBehavior()
+    this.#watchAutonomousMovement()
     return true
   }
 
@@ -163,10 +169,11 @@ class MovementController {
     return requested.goal
   }
 
-  completeAutonomousGoal(goalId) {
+  completeAutonomousGoal(goalId, reason = 'GOAL_REACHED') {
     if (this.behavior.source !== GOAL_SOURCES.AUTONOMOUS || this.behavior.goalId !== goalId) return false
+    this.#clearAutonomousWatchdog()
     this.behavior = { type: 'STOP', source: null, goalId: null }
-    this.goalManager?.complete(goalId)
+    this.goalManager?.complete(goalId, GOAL_STATES.COMPLETED, { reason })
     if (this.arbiter.owner === LOCOMOTION_OWNERS.AUTONOMY) {
       this.arbiter.release(LOCOMOTION_OWNERS.AUTONOMY)
       this.#stopPathing()
@@ -364,6 +371,77 @@ class MovementController {
     }
   }
 
+  handlePathUpdate(result) {
+    if (result?.status !== 'noPath' || this.arbiter.owner !== LOCOMOTION_OWNERS.AUTONOMY ||
+        !this.#isFiniteAutonomousMove()) return false
+    return this.#failAutonomousMovement('NO_PATH')
+  }
+
+  #isFiniteAutonomousMove() {
+    return this.behavior.source === GOAL_SOURCES.AUTONOMOUS &&
+      ['WANDER_NEAR_PLAYER', 'EXPLORE_NEARBY', 'AUTONOMOUS_COME'].includes(this.behavior.type)
+  }
+
+  #watchAutonomousMovement() {
+    this.#clearAutonomousWatchdog()
+    if (!this.#isFiniteAutonomousMove()) return
+    const goalId = this.behavior.goalId
+    let activeMs = 0
+    let stalledMs = 0
+    let previous = this.bot.entity?.position?.clone?.() || this.bot.entity?.position || null
+    this.autonomousWatchdog = this.setIntervalFn(() => {
+      if (!this.#isFiniteAutonomousMove() || this.behavior.goalId !== goalId) {
+        this.#clearAutonomousWatchdog()
+        return
+      }
+      if (this.arbiter.owner !== LOCOMOTION_OWNERS.AUTONOMY) return
+      activeMs += 2000
+      const current = this.bot.entity?.position
+      if (current && previous && current.distanceTo?.(previous) >= 0.5) stalledMs = 0
+      else stalledMs += 2000
+      previous = current?.clone?.() || current || null
+      if (activeMs >= this.autonomousMoveTimeoutMs || stalledMs >= Math.min(16000, this.autonomousMoveTimeoutMs)) {
+        this.#failAutonomousMovement(activeMs >= this.autonomousMoveTimeoutMs ? 'MOVE_TIMEOUT' : 'STALLED')
+      }
+    }, 2000)
+    this.autonomousWatchdog?.unref?.()
+  }
+
+  #watchAutonomousFollow(maxDurationMs) {
+    this.#clearAutonomousWatchdog()
+    const goalId = this.behavior.goalId
+    let activeMs = 0
+    this.autonomousWatchdog = this.setIntervalFn(() => {
+      if (this.behavior.source !== GOAL_SOURCES.AUTONOMOUS ||
+          this.behavior.type !== 'FOLLOW' || this.behavior.goalId !== goalId) {
+        this.#clearAutonomousWatchdog()
+        return
+      }
+      if (this.arbiter.owner !== LOCOMOTION_OWNERS.AUTONOMY) return
+      activeMs += 2000
+      if (activeMs >= maxDurationMs) this.completeAutonomousGoal(goalId, 'FOLLOW_INTERVAL_ENDED')
+    }, 2000)
+    this.autonomousWatchdog?.unref?.()
+  }
+
+  #clearAutonomousWatchdog() {
+    if (this.autonomousWatchdog !== null) this.clearIntervalFn(this.autonomousWatchdog)
+    this.autonomousWatchdog = null
+  }
+
+  #failAutonomousMovement(reason) {
+    if (!this.#isFiniteAutonomousMove()) return false
+    const goalId = this.behavior.goalId
+    const type = this.behavior.type
+    this.#clearAutonomousWatchdog()
+    this.behavior = { type: 'STOP', source: null, goalId: null }
+    if (goalId) this.goalManager?.complete(goalId, GOAL_STATES.FAILED, { reason })
+    this.arbiter.release(LOCOMOTION_OWNERS.AUTONOMY)
+    this.#stopPathing()
+    this.logger.info(`[AUTONOMY] ${type} failed: ${reason}`)
+    return true
+  }
+
   #canStartAutonomous(expectedEpoch) {
     if (this.learningActive) return false
     if (expectedEpoch !== null && !this.arbiter.isAutonomyEpoch(expectedEpoch)) return false
@@ -429,6 +507,8 @@ class MovementController {
     if (!['completed', 'abandoned', 'failed'].includes(change.event)) return
     if (!this.behavior.goalId || this.behavior.goalId !== change.goal.id) return
     if (this.overrideOwner && change.event === 'completed') return
+
+    this.#clearAutonomousWatchdog()
 
     const movementOwner = this.behavior.source === GOAL_SOURCES.PLAYER_TASK
       ? LOCOMOTION_OWNERS.PLAYER_TASK

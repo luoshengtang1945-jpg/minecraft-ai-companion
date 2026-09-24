@@ -145,6 +145,19 @@ test('empty response retry can recover', async () => {
   assert.equal(calls, 2)
 })
 
+test('invalid JSON retry changes the prompt to request a complete object', async () => {
+  const bodies = []
+  const result = await request(async (_url, options) => {
+    bodies.push(JSON.parse(options.body))
+    return response(bodies.length === 1 ? '{"action":"OBSERVE"' : '{"action":"OBSERVE"}')
+  }, { retries: 1, backoffMs: 0 })
+  assert.equal(result.action, 'OBSERVE')
+  assert.equal(bodies.length, 2)
+  assert.equal(bodies[0].messages.length, 2)
+  assert.equal(bodies[1].messages.length, 3)
+  assert.match(bodies[1].messages[2].content, /COMPLETE JSON object/)
+})
+
 test('invalid JSON retry exhaustion preserves the specific status', async () => {
   let calls = 0
   await assert.rejects(request(async () => {
