@@ -101,6 +101,9 @@ function decisionSchemaForObservation(observation, attempts = [], repetitionThre
   const relevantDropRefs = objectiveDropRefs(observation, goal)
   const relevantBlockRefs = objectiveBlockRefs(observation, goal)
   const matchingDropObserved = relevantDropRefs.length > 0
+  const reachableDropRefs = relevantDropRefs.filter(ref => !unproductiveMoveTargets.has(ref))
+  const distantDropRefs = reachableDropRefs.filter(ref =>
+    (observation.nearbyEntities.find(entity => entity.ref === ref)?.distance ?? Infinity) > 1.1)
   const blocks = (observation?.nearbyBlocks || []).map(block => block?.ref)
     .filter(ref => typeof ref === 'string' && /^block:-?\d+,-?\d+,-?\d+$/.test(ref))
   const diggableBlocks = (observation?.nearbyBlocks || [])
@@ -109,6 +112,9 @@ function decisionSchemaForObservation(observation, attempts = [], repetitionThre
       block?.diggable !== false && !failedTargets.has(block?.ref) &&
       !unproductiveMaterials.has(block?.name) && blocks.includes(block?.ref))
     .map(block => block.ref)
+  const actionableBlockRefs = relevantBlockRefs.filter(ref =>
+    diggableBlocks.includes(ref) || !unproductiveMoveTargets.has(ref) && (observation?.nearbyBlocks || []).some(block =>
+      block.ref === ref && (!Number.isFinite(block.distance) || block.distance > 3.5)))
   const entities = (observation?.nearbyEntities || []).map(entity => entity?.ref)
     .filter(ref => typeof ref === 'string' && /^entity:\d+$/.test(ref))
   const hostiles = (observation?.nearbyEntities || []).filter(entity => entity?.type === 'hostile')
@@ -122,7 +128,15 @@ function decisionSchemaForObservation(observation, attempts = [], repetitionThre
   const variants = LEARNING_ACTION_SCHEMA.oneOf.flatMap(variant => {
     const action = variant.properties.action.const
     if (discouraged.has(action)) return []
-    if (matchingDropObserved && ['EXPLORE', 'LOOK_VISUALLY'].includes(action)) return []
+    // An observed objective stack is direct, actionable evidence. Avoid spending
+    // the action budget on unrelated controls while it remains outside pickup range.
+    // If the approach has already failed, restore alternatives for replanning.
+    if (distantDropRefs.length && action !== 'MOVE_NEAR') return []
+    if (reachableDropRefs.length && !distantDropRefs.length &&
+      !['MOVE_NEAR', 'WAIT', 'OBSERVE'].includes(action)) return []
+    if (!matchingDropObserved && actionableBlockRefs.length &&
+      !['MOVE_NEAR', 'DIG_BLOCK'].includes(action)) return []
+    if (reachableDropRefs.length && ['EXPLORE', 'LOOK_VISUALLY'].includes(action)) return []
     if (action === 'OBSERVE' && repeatedUnproductiveObservation(attempts, observation, goal)) return []
     if (action === 'SAY' && goal?.objective?.type === 'INVENTORY_AT_LEAST') return []
     if (action === 'USE_ITEM' && !observation?.heldItem?.name) return []
@@ -164,13 +178,34 @@ function validateObservedPrimitiveAction(value, observation, attempts = [], repe
   if (action.action === 'SAY' && goal?.objective?.type === 'INVENTORY_AT_LEAST') {
     throw new Error('Speech cannot satisfy an inventory objective')
   }
+  const reachableDrops = objectiveDropRefs(observation, goal)
+    .filter(ref => !repeatedUnproductiveMoveTargets(attempts, repetitionThreshold).has(ref))
+  const distantDrops = reachableDrops.filter(ref =>
+    (observation?.nearbyEntities?.find(entity => entity.ref === ref)?.distance ?? Infinity) > 1.1)
+  if (distantDrops.length && (action.action !== 'MOVE_NEAR' || !distantDrops.includes(action.target))) {
+    throw new Error('Observed objective stack is outside pickup range; approach it before unrelated actions')
+  }
+  if (reachableDrops.length && !distantDrops.length &&
+    !['MOVE_NEAR', 'WAIT', 'OBSERVE'].includes(action.action)) {
+    throw new Error('Observed objective stack is nearby; check pickup before unrelated actions')
+  }
+  const actionableBlocks = objectiveBlockRefs(observation, goal).filter(ref =>
+    !failedDigTargets(attempts).has(ref) &&
+    (observation?.nearbyBlocks || []).some(block => block.ref === ref &&
+      (!failedDigMaterials(attempts).has(block.name) && block.diggable !== false ||
+        !repeatedUnproductiveMoveTargets(attempts, repetitionThreshold).has(ref) &&
+        (!Number.isFinite(block.distance) || block.distance > 3.5))))
+  if (!reachableDrops.length && actionableBlocks.length &&
+    !['MOVE_NEAR', 'DIG_BLOCK'].includes(action.action)) {
+    throw new Error('Observed objective block is actionable; use a relevant physical primitive first')
+  }
   if (discouragedParameterlessActions(attempts, repetitionThreshold).has(action.action)) {
     throw new Error('Repeated no-progress primitive is temporarily unavailable')
   }
   if (action.action === 'OBSERVE' && repeatedUnproductiveObservation(attempts, observation, goal)) {
     throw new Error('Repeated observation of the same objective evidence produced no progress')
   }
-  if (objectiveDropRefs(observation, goal).length && ['EXPLORE', 'LOOK_VISUALLY'].includes(action.action)) {
+  if (reachableDrops.length && ['EXPLORE', 'LOOK_VISUALLY'].includes(action.action)) {
     throw new Error('A matching objective item is already observed nearby')
   }
   if (action.action === 'USE_ITEM' && !observation?.heldItem?.name) {

@@ -56,24 +56,56 @@ test('inventory-goal decision highlights matching observed drops and rejects spe
     [{ ref: 'entity:7', distance: 2.4, count: 1 }])
   assert.equal(payload.allowedActions.includes('SAY'), false)
   const schema = decisionSchemaForObservation(current, [], 2, goal)
+  assert.deepEqual([...new Set(schema.oneOf.map(variant => variant.properties.action.const))], ['MOVE_NEAR'])
+  assert.throws(() => validateObservedPrimitiveAction({ action: 'SELECT_SLOT', slot: 0 },
+    current, [], 2, goal), /outside pickup range/)
   assert.equal(schema.oneOf.some(variant => variant.properties.action.const === 'SAY'), false)
   assert.throws(() => validateObservedPrimitiveAction({ action: 'SAY', message: 'I have it' },
     current, [], 2, goal), /Speech cannot satisfy/)
   const dig = schema.oneOf.find(variant => variant.properties.action.const === 'DIG_BLOCK')
   assert.equal(dig, undefined)
   assert.throws(() => validateObservedPrimitiveAction({ action: 'DIG_BLOCK', target: 'block:1,64,0' },
-    current, [], 2, goal), /objective item should be collected/)
+    current, [], 2, goal), /objective stack is outside pickup range/)
   const moveTargets = schema.oneOf.filter(variant => variant.properties.action.const === 'MOVE_NEAR')
   assert.deepEqual(moveTargets.map(variant => variant.properties.target.enum), [['entity:7']])
   assert.throws(() => validateObservedPrimitiveAction({ action: 'MOVE_NEAR', target: 'block:1,64,0', distance: 1 },
-    current, [], 2, goal), /objective item before unrelated/)
+    current, [], 2, goal), /objective stack is outside pickup range/)
   const attempts = [{ action: { action: 'OBSERVE' }, evaluation: { status: 'NO_PROGRESS' },
     observationAfter: { nearbyEntities: [{ ref: 'entity:7' }] } }]
   const afterObserve = decisionSchemaForObservation(current, attempts, 2, goal)
   assert.equal(afterObserve.oneOf.some(variant => variant.properties.action.const === 'OBSERVE'), false)
   assert.equal(afterObserve.oneOf.some(variant => variant.properties.action.const === 'EXPLORE'), false)
   assert.throws(() => validateObservedPrimitiveAction({ action: 'OBSERVE' }, current, attempts, 2, goal),
-    /Repeated/)
+    /outside pickup range/)
+})
+
+test('nearby objective stack permits settling but not unrelated inventory controls', () => {
+  const goal = createItemGoal('birch_log')
+  const current = observation({}, { nearbyEntities: [
+    { ref: 'entity:7', distance: 0.7, droppedItem: { name: 'birch_log', count: 1 } }
+  ] })
+  const actions = decisionSchemaForObservation(current, [], 2, goal).oneOf
+    .map(variant => variant.properties.action.const)
+  assert.equal(actions.includes('WAIT'), true)
+  assert.equal(actions.includes('SELECT_SLOT'), false)
+  assert.throws(() => validateObservedPrimitiveAction({ action: 'SELECT_SLOT', slot: 1 },
+    current, [], 2, goal), /check pickup/)
+})
+
+test('failed approach to observed objective stack restores exploration for replanning', () => {
+  const goal = createItemGoal('birch_log')
+  const current = observation({}, { nearbyEntities: [
+    { ref: 'entity:7', distance: 4, droppedItem: { name: 'birch_log', count: 1 } }
+  ] })
+  const attempts = [1, 2].map(() => ({
+    action: { action: 'MOVE_NEAR', target: 'entity:7', distance: 1 },
+    evaluation: { status: 'NO_PROGRESS' }
+  }))
+  const schema = decisionSchemaForObservation(current, attempts, 2, goal)
+  assert.equal(schema.oneOf.some(variant => variant.properties.action.const === 'EXPLORE'), true)
+  assert.equal(schema.oneOf.some(variant => variant.properties.action.const === 'MOVE_NEAR'), false)
+  assert.equal(validateObservedPrimitiveAction({ action: 'EXPLORE', heading: 90, distance: 8 },
+    current, attempts, 2, goal).action, 'EXPLORE')
 })
 
 test('block MOVE_NEAR excludes already-near blocks while retaining bounded model arguments', () => {
@@ -112,6 +144,10 @@ test('observed objective block focuses target choices without prescribing the pr
     { ref: 'block:2,63,0', name: 'dirt', distance: 2.2, diggable: true }
   ] })
   const schema = decisionSchemaForObservation(far, [], 2, goal)
+  assert.deepEqual([...new Set(schema.oneOf.map(entry => entry.properties.action.const))],
+    ['MOVE_NEAR', 'DIG_BLOCK'])
+  assert.throws(() => validateObservedPrimitiveAction({ action: 'SELECT_SLOT', slot: 0 },
+    far, [], 2, goal), /objective block is actionable/)
   assert.deepEqual(schema.oneOf.filter(entry => entry.properties.action.const === 'MOVE_NEAR')
     .map(entry => entry.properties.target.enum), [['block:6,64,0']])
   assert.deepEqual(schema.oneOf.find(entry => entry.properties.action.const === 'DIG_BLOCK')
