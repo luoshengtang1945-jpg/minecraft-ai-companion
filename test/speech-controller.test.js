@@ -1,7 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const { SpeechController } = require('../src/autonomy/speech-controller')
-const { speechTopic } = require('../src/autonomy/speech-topic')
+const { speechTopic, speechTopics } = require('../src/autonomy/speech-topic')
 const { proactiveClaimIssue } = require('../src/autonomy/proactive-claims')
 
 test('proactive speech does not invent a shared work task or propose unavailable work', () => {
@@ -50,6 +50,21 @@ test('proactive topics group paraphrases without confusing rain and clear weathe
   assert.equal(speechTopic('今天没下雨'), 'WEATHER_CLEAR')
   assert.equal(speechTopic('开始下雨了'), 'WEATHER_RAIN')
   assert.equal(speechTopic('我挺喜欢这片草地'), null)
+  assert.deepEqual(speechTopics('雨天夜色里，小心点。'), ['WEATHER_RAIN', 'TIME_NIGHT'])
+  assert.deepEqual(speechTopics('夜色渐深，小心点。'), ['TIME_NIGHT'])
+})
+
+test('a combined rain-and-night comment blocks a paraphrase about either topic', () => {
+  let now = 0
+  const spoken = []
+  const speech = new SpeechController({ chat: text => spoken.push(text) }, {
+    cooldownMs: 1000, dedupMs: 300000, now: () => now, logger: { info() {} }
+  })
+  assert.equal(speech.say('雨天夜色里，小心点。'), true)
+  now = 70000
+  assert.equal(speech.say('夜色渐深，小心点。'), false)
+  assert.equal(speech.lastResult.reason, 'TOPIC_DEDUP')
+  assert.deepEqual(spoken, ['雨天夜色里，小心点。'])
 })
 
 test('proactive paraphrases about the same night are not repeated with new model reasons', () => {

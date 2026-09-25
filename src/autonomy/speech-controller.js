@@ -1,5 +1,5 @@
 const { checkWorldClaim } = require('../agent/world-claims')
-const { speechTopic } = require('./speech-topic')
+const { speechTopics } = require('./speech-topic')
 const { proactiveClaimIssue } = require('./proactive-claims')
 
 class SpeechController {
@@ -26,11 +26,12 @@ class SpeechController {
     const now = this.now()
     if (now - this.lastSpokenAt < this.cooldownMs) return this.#reject('SPEECH_COOLDOWN')
 
-    const normalized = speechTopic(message) || String(key || message).toLowerCase().replace(/\s+/g, ' ').trim()
-    if (now - (this.recent.get(normalized) ?? -Infinity) < this.dedupMs) return this.#reject('TOPIC_DEDUP')
+    const topics = speechTopics(message)
+    if (!topics.length) topics.push(String(key || message).toLowerCase().replace(/\s+/g, ' ').trim())
+    if (topics.some(topic => now - (this.recent.get(topic) ?? -Infinity) < this.dedupMs)) return this.#reject('TOPIC_DEDUP')
 
     this.lastSpokenAt = now
-    this.recent.set(normalized, now)
+    for (const topic of topics) this.recent.set(topic, now)
     for (const [oldKey, spokenAt] of this.recent) {
       if (now - spokenAt >= this.dedupMs) this.recent.delete(oldKey)
     }
