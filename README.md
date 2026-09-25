@@ -1,7 +1,15 @@
 # Minecraft AI Companion
 
-See [the companion checkpoint](docs/COMPANION-CHECKPOINT.md) for user-verified
-behavior, release checks, remaining limitations, and the next development priorities.
+## 当前版本速览（2026-09-25）
+
+这是运行在本机的 Minecraft Java 1.21.11 陪玩实验项目：Mineflayer 负责身体和路径移动，本地 Ollama/Qwen 负责聊天与低频决策，Fabric 客户端模块负责自定义皮肤和可选的同伴视角。无需付费 API 或第二个 Minecraft 账号。
+
+- **已在游戏中验证：** 加入局域网、自然语言聊天、持续跟随/过来/停下、玩家指令优先的移动仲裁、防御模式战斗与生存反应、附近床的睡觉/起床、独立的同伴皮肤、轻量存在感及有限的主动说话。
+- **可选的同伴视角：** Fabric 可从 `AI_Companion` 所在位置另行渲染画面，经本机桥接交给 Qwen；视觉问答会等待新画面，不会把玩家的窗口直接当作机器人视角。物体识别仍可能出错，不能代替游戏服务端事实。
+- **实验性学习：** 在受控场景里，模型可选择受验证的基础动作，并按观察、执行、评价、反思、记忆循环。一次实测中它挖掉单块原木后走近掉落物，背包确认成功；清空背包后的第二次实测也成功。**这不等于它已经会独立寻找树、挖矿、合成或建房。** 自动学习默认关闭。
+- **当前边界：** 还不是真人水平的通用 Minecraft 玩家；主动说话可能偏机械，视觉与活动判断可能不准。一般自主行动只在玩家附近做有限移动、观察和交流，生存反应始终优先。
+
+详细的验证范围、运行方式和剩余限制见[当前版本检查点](docs/COMPANION-CHECKPOINT.md)及下文。个人 `.env`、皮肤 PNG、世界数据、模型文件、学习记忆、截图和构建产物不会提交到仓库。
 
 A local-first autonomous companion for Minecraft Java Edition, built with Mineflayer, mineflayer-pathfinder, Ollama, and `qwen3-vl:8b`. It can converse and follow player commands, but it also observes a compact game state and occasionally chooses its own safe nearby action when the player says nothing.
 
