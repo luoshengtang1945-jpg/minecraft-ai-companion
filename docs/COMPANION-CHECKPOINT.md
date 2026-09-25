@@ -1,6 +1,6 @@
 # Current companion checkpoint — 2026-09-25
 
-Branch: `feature/learning-agent`. This is the current development version, built on the stable Stage 3 architecture. It is **not** a claim of general autonomous Minecraft competence.
+This checkpoint builds on the stable Stage 3 architecture and documents the Stage 4 learning/perception development version. It is **not** a claim of general autonomous Minecraft competence.
 
 ## Components and working features
 

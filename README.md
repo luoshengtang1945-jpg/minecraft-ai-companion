@@ -15,7 +15,7 @@ A local-first autonomous companion for Minecraft Java Edition, built with Minefl
 
 The project requires no paid API. Stage 4.2 adds opt-in local multimodal perception, including a companion-position render camera through the Fabric client. It does **not** implement voice, long-term visual memory, or general Minecraft play.
 
-The manually validated Stage 3 stack remains the stable foundation. The current feature branch adds a minimal Learning Agent loop: a fixed, opt-in `oak_log` experiment plus optional model-proposed nearby item experiments. Both use validated primitives, observation, evaluation, reflection, and local memory. Automatic learning is disabled by default.
+The manually validated Stage 3 stack remains the stable foundation. The current version also includes a minimal Learning Agent loop: a fixed, opt-in `oak_log` experiment plus optional model-proposed nearby item experiments. Both use validated primitives, observation, evaluation, reflection, and local memory. Automatic learning is disabled by default.
 
 ## Current capabilities
 
