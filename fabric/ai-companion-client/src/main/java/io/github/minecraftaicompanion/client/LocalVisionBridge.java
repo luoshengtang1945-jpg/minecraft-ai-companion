@@ -72,7 +72,11 @@ final class LocalVisionBridge {
     }
 
     void onFrameRendered(MinecraftClient client) {
-        if (!config.visionEnabled || client.world == null || client.player == null || capturePending.get()) return;
+        // The full second render includes an open screen. Wait for gameplay so chat input,
+        // command suggestions, and menus are never mistaken for the companion's scene.
+        if (!config.visionEnabled || client.world == null || client.player == null
+            || (config.visionPerspective.equals("COMPANION_CAMERA") && client.currentScreen != null)
+            || capturePending.get()) return;
         long now = System.currentTimeMillis();
         int interval = config.visionPerspective.equals("COMPANION_CAMERA")
             ? config.visionCompanionCaptureIntervalMs : config.visionCaptureIntervalMs;
@@ -135,8 +139,10 @@ final class LocalVisionBridge {
             client.setCameraEntity(companion);
             var encoder = com.mojang.blaze3d.systems.RenderSystem.getDevice().createCommandEncoder();
             encoder.clearColorAndDepthTextures(companionFramebuffer.getColorAttachment(), 0, companionFramebuffer.getDepthAttachment(), 1.0);
-            client.gameRenderer.updateCamera(RenderTickCounter.ONE);
-            client.gameRenderer.renderWorld(RenderTickCounter.ONE);
+            // 1.21.11 uploads camera-dependent shader settings in render(), not renderWorld().
+            // Calling renderWorld() alone used the companion for CPU culling while retaining
+            // the human player's previous GPU camera, yielding a mismatched image and pose.
+            client.gameRenderer.render(RenderTickCounter.ONE, true);
             return companionFramebuffer;
         } finally {
             client.setCameraEntity(originalCamera);

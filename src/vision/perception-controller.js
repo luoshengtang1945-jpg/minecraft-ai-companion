@@ -71,7 +71,15 @@ class VisualPerceptionController {
     if (!this.config.enabled) return { status: 'UNAVAILABLE', reason: 'VISION_DISABLED' }
     const kind = REQUEST_KINDS[priority]
     if (!kind) throw new Error(`Unknown visual priority: ${priority}`)
-    const frame = this.frameStore.getLatest({ maxAgeMs: requireFresh ? this.config.freshFrameMs : this.config.frameMaxAgeMs })
+    let frame = this.frameStore.getLatest({ maxAgeMs: requireFresh ? this.config.freshFrameMs : this.config.frameMaxAgeMs })
+    if (requireFresh && (!frame || frame.uiState !== 'GAMEPLAY') && this.config.freshFrameWaitMs > 0) {
+      this.logger?.info('[VISION] waiting for a fresh gameplay frame')
+      frame = await this.frameStore.waitForLatest({
+        maxAgeMs: this.config.freshFrameMs,
+        timeoutMs: this.config.freshFrameWaitMs,
+        gameplayOnly: true
+      })
+    }
     if (!frame) return { status: 'UNAVAILABLE', reason: 'NO_FRESH_FRAME' }
     if (frame.uiState && frame.uiState !== 'GAMEPLAY') return { status: 'SKIPPED', reason: 'UI_SCREEN' }
     if (priority === 'BACKGROUND') {

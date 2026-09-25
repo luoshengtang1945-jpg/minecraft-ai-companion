@@ -33,6 +33,7 @@ class FrameStore {
     this.latest = null
     this.dropped = 0
     this.received = 0
+    this.waiters = new Set()
   }
 
   accept(buffer, metadata = {}) {
@@ -64,12 +65,36 @@ class FrameStore {
       dimension: typeof metadata.dimension === 'string' ? metadata.dimension.slice(0, 100) : null,
       buffer
     })
+    for (const waiter of this.waiters) {
+      if (this.now() - this.latest.capturedAt <= waiter.maxAgeMs &&
+          (!waiter.gameplayOnly || this.latest.uiState === 'GAMEPLAY')) {
+        waiter.finish(this.latest)
+      }
+    }
     return { accepted: true, frame: this.latest, replaced: this.dropped > 0 }
   }
 
   getLatest({ maxAgeMs = this.maxAgeMs } = {}) {
     if (!this.latest || this.now() - this.latest.capturedAt > maxAgeMs) return null
     return this.latest
+  }
+
+  waitForLatest({ maxAgeMs = this.maxAgeMs, timeoutMs = 0, gameplayOnly = false } = {}) {
+    const current = this.getLatest({ maxAgeMs })
+    if (current && (!gameplayOnly || current.uiState === 'GAMEPLAY')) return Promise.resolve(current)
+    if (timeoutMs <= 0) return Promise.resolve(null)
+    return new Promise(resolve => {
+      const waiter = {
+        maxAgeMs, gameplayOnly,
+        finish: frame => {
+          clearTimeout(waiter.timer)
+          this.waiters.delete(waiter)
+          resolve(frame)
+        }
+      }
+      waiter.timer = setTimeout(() => waiter.finish(null), timeoutMs)
+      this.waiters.add(waiter)
+    })
   }
 }
 

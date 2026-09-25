@@ -164,6 +164,46 @@ test('cheap scene signatures detect changed frames without model inference', () 
   assert.equal(signatureDistance('00ff', 'ffff'), 0.5)
 })
 
+test('fresh frame waiter ignores chat UI and resolves on a gameplay frame', async () => {
+  let now = 1000
+  const store = new FrameStore({ now: () => now })
+  const waiting = store.waitForLatest({ maxAgeMs: 100, timeoutMs: 100, gameplayOnly: true })
+  assert.equal(store.waiters.size, 1)
+  store.accept(png(), { id: 'chat', capturedAt: now, perspective: 'COMPANION_CAMERA', uiState: 'CHAT' })
+  assert.equal(store.waiters.size, 1)
+  now += 1
+  store.accept(png(), { id: 'scene', capturedAt: now, perspective: 'COMPANION_CAMERA', uiState: 'GAMEPLAY' })
+  assert.equal((await waiting).id, 'scene')
+  assert.equal(store.waiters.size, 0)
+})
+
+test('fresh frame waiter times out without leaking listeners', async () => {
+  const store = new FrameStore()
+  assert.equal(await store.waitForLatest({ timeoutMs: 5, gameplayOnly: true }), null)
+  assert.equal(store.waiters.size, 0)
+})
+
+test('explicit visual inference waits asynchronously for the next valid frame', async () => {
+  let now = 1000
+  const store = new FrameStore({ now: () => now })
+  const model = new MultimodalWorldModel({ now: () => now })
+  let observed = 0
+  const controller = new VisualPerceptionController({
+    frameStore: store, worldModel: model, logger, now: () => now,
+    client: { observe: async () => { observed++; return visual() } },
+    config: { enabled: true, frameMaxAgeMs: 1000, freshFrameMs: 100,
+      freshFrameWaitMs: 100, backgroundCooldownMs: 1000 }
+  })
+  const pending = controller.request({ priority: 'PLAYER', requireFresh: true })
+  assert.equal(observed, 0)
+  now += 1
+  frame(store, now, 'after-chat')
+  const result = await pending
+  assert.equal(result.status, 'UPDATED')
+  assert.equal(result.frameId, 'after-chat')
+  assert.equal(observed, 1)
+})
+
 test('structured visual observations are strict and cannot introduce precise coordinates', () => {
   assert.equal(validateVisualObservation(visual()).sceneType, 'OPEN_TERRAIN')
   assert.throws(() => validateVisualObservation({ ...visual(), coordinates: { x: 1, y: 2, z: 3 } }), /unexpected/)
@@ -304,6 +344,8 @@ test('conversation routing requests vision only for genuinely visual questions',
   assert.equal(requiresVisualContext('你描述一下你的视角'), true)
   assert.equal(requiresVisualContext('你现在看到什么'), true)
   assert.equal(requiresVisualContext('你现在看到的是什么'), true)
+  assert.equal(requiresVisualContext('你现在眼前的彩色方块是什么颜色？'), true)
+  assert.equal(requiresVisualContext('你现在看到的彩色方块是什么颜色？'), true)
   assert.equal(requiresVisualContext('你看到了什么'), true)
   assert.equal(requiresVisualContext('你觉得这里怎么样'), true)
   assert.equal(isVisualFollowUp('现在呢'), true)

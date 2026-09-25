@@ -132,6 +132,7 @@ module.exports = {
     maxHeight: numberFromEnv('VISION_MAX_HEIGHT', 720, { min: 90, max: 2160 }),
     frameMaxAgeMs: numberFromEnv('VISION_FRAME_MAX_AGE_MS', 15000, { min: 1000, max: 120000 }),
     freshFrameMs: numberFromEnv('VISION_FRESH_FRAME_MS', 5000, { min: 500, max: 30000 }),
+    freshFrameWaitMs: numberFromEnv('VISION_FRESH_FRAME_WAIT_MS', 6000, { min: 0, max: 30000 }),
     backgroundIntervalMs: numberFromEnv('VISION_BACKGROUND_INTERVAL_MS', 45000, { min: 5000 }),
     backgroundCooldownMs: numberFromEnv('VISION_BACKGROUND_COOLDOWN_MS', 30000, { min: 5000 }),
     eventMinGapMs: numberFromEnv('VISION_EVENT_MIN_GAP_MS', 15000, { min: 1000 }),

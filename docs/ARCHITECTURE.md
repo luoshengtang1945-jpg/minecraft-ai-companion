@@ -196,12 +196,14 @@ This module is the appropriate future boundary for client-only visual
 indicators or positional presentation. It must not become an alternate owner
 of Mineflayer movement or survival decisions.
 
-The same module can optionally observe completed renders through Minecraft
-1.21.11's native `ScreenshotRecorder` framebuffer API. It downsamples before
-transport and performs PNG encoding / HTTP work on a daemon executor. The
-current capture is labelled `HUMAN_CLIENT_CAMERA`: it is an explicit shared
-view approximation, not the Mineflayer entity's eyes. The protocol carries the
-perspective so a future off-screen companion camera can replace it cleanly.
+The same module can optionally capture either the human framebuffer
+(`HUMAN_CLIENT_CAMERA`) or a second first-person render from the loaded
+companion entity (`COMPANION_CAMERA`). The second pass must call the complete
+1.21.11 `GameRenderer.render`: `renderWorld` alone updates the CPU camera but
+retains the human camera's GPU shader state, producing a false image/pose pair.
+Screens are skipped so chat input and menus cannot enter the companion image.
+Both modes downsample before transport and perform PNG encoding / HTTP work
+on a daemon executor. Visual inference is advisory and never owns movement.
 
 ## Multimodal world model
 
