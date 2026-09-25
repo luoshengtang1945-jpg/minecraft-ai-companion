@@ -13,6 +13,7 @@ test('proactive speech does not invent a shared work task or propose unavailable
   assert.equal(proactiveClaimIssue('天亮了，咱们一起找点煤炭吧。', state), 'UNSUPPORTED_WORK_PROPOSAL')
   assert.equal(proactiveClaimIssue('白天好，一起看看附近有没有铜矿？', state), 'UNSUPPORTED_WORK_PROPOSAL')
   assert.equal(proactiveClaimIssue('刚才被发光鱿鱼撞了一下，不过没事。', state), 'UNVERIFIED_ATTACKER')
+  assert.equal(proactiveClaimIssue('我刚在附近找到一棵小树，原木在手了。', state), 'UNVERIFIED_DISCOVERY')
   assert.equal(proactiveClaimIssue('我得去附近看看有没有煤炭。', state), 'UNSTARTED_MOVEMENT_CLAIM')
   assert.equal(proactiveClaimIssue('天光正好，你站得稳稳的，我跟着你。', {
     ...state, behavior: { type: 'STOP', locomotionOwner: 'PLAYER' }
@@ -40,6 +41,8 @@ test('unsupported proactive work claim is withheld before speech cooldown is con
   })
   assert.equal(speech.say('最近挖煤进度如何？', 'new reason', { currentGoal: null }), false)
   assert.equal(speech.lastResult.reason, 'UNOBSERVED_SHARED_TASK')
+  assert.equal(speech.say('我刚在附近找到一棵小树，原木在手了。'), false)
+  assert.equal(speech.lastResult.reason, 'UNVERIFIED_DISCOVERY')
   assert.equal(speech.say('这边挺安静，我先看看。'), true)
   assert.deepEqual(messages, ['这边挺安静，我先看看。'])
 })
